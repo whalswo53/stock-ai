@@ -312,7 +312,7 @@ def build_chart(df: pd.DataFrame) -> go.Figure:
     return fig
 
 
-st.plotly_chart(build_chart(df), use_container_width=True)
+st.plotly_chart(build_chart(df), width="stretch")
 
 
 # ── Signal summary ────────────────────────────────────────────────────────────
@@ -365,4 +365,4 @@ with st.expander("최근 가격 데이터"):
         for col in ["Open", "High", "Low", "Close"]:
             display[col] = display[col].map(lambda x: f"${x:,.2f}")
     display["Volume"] = display["Volume"].map(fmt_volume)
-    st.dataframe(display, use_container_width=True)
+    st.dataframe(display, width="stretch")

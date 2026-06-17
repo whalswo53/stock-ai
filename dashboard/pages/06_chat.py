@@ -77,14 +77,12 @@ def resolve_ticker(raw: str, market: str) -> tuple[str, str]:
 
 
 def copy_open_button(prompt: str) -> None:
-    """
-    Renders a single HTML button that:
-    1. Copies the prompt to clipboard (execCommand fallback — works in iframes)
-    2. Opens claude.ai/new in a new tab
-    """
+    """Renders a button that copies the prompt to clipboard."""
     b64 = base64.b64encode(prompt.encode("utf-8")).decode("ascii")
     html = f"""
+<meta charset="utf-8">
 <style>
+  body {{ margin: 0; padding: 0; }}
   .claude-btn {{
     background: linear-gradient(135deg, #7C3AED 0%, #5B21B6 100%);
     color: #fff;
@@ -102,23 +100,48 @@ def copy_open_button(prompt: str) -> None:
   .claude-btn:active {{ opacity: .75; transform: scale(.99); }}
 </style>
 <button class="claude-btn" onclick="(function(btn){{
-  var text = atob('{b64}');
-  var ta = document.createElement('textarea');
-  ta.value = text;
-  ta.style.position = 'fixed';
-  ta.style.opacity = '0';
-  document.body.appendChild(ta);
-  ta.focus(); ta.select();
-  try {{ document.execCommand('copy'); }} catch(e) {{}}
-  document.body.removeChild(ta);
-  window.open('https://claude.ai/new', '_blank');
-  btn.textContent = '✅ 복사 완료 — Claude.ai가 열렸습니다! Ctrl+V 후 전송하세요';
-  setTimeout(function(){{
-    btn.textContent = '📋 프롬프트 복사 + Claude.ai 열기';
-  }}, 4000);
-}})(this)">📋 프롬프트 복사 + Claude.ai 열기</button>
+  var bytes = Uint8Array.from(atob('{b64}'), function(c) {{ return c.charCodeAt(0); }});
+  var text = new TextDecoder('utf-8').decode(bytes);
+
+  function markDone() {{
+    btn.textContent = '✅ 복사됐습니다. Claude.ai에서 직접 붙여넣어주세요';
+    setTimeout(function() {{ btn.textContent = '📋 프롬프트 복사'; }}, 4000);
+  }}
+
+  function fallbackCopy(t) {{
+    var doc = (window.parent && window.parent !== window && window.parent.document)
+      ? window.parent.document : document;
+    var ta = doc.createElement('textarea');
+    ta.value = t;
+    ta.style.cssText = 'position:fixed;opacity:0;top:0;left:0;';
+    doc.body.appendChild(ta);
+    ta.focus(); ta.select();
+    try {{
+      var ok = doc.execCommand('copy');
+      if (!ok) {{ console.error('[Copy] execCommand returned false'); }}
+    }} catch(e) {{
+      console.error('[Copy] execCommand failed:', e);
+    }}
+    doc.body.removeChild(ta);
+    markDone();
+  }}
+
+  var targetNav = (window.parent && window.parent !== window && window.parent.navigator)
+    ? window.parent.navigator : navigator;
+
+  if (targetNav.clipboard && targetNav.clipboard.writeText) {{
+    targetNav.clipboard.writeText(text)
+      .then(function() {{ markDone(); }})
+      .catch(function(err) {{
+        console.error('[Copy] Clipboard API failed:', err);
+        fallbackCopy(text);
+      }});
+  }} else {{
+    fallbackCopy(text);
+  }}
+}})(this)">📋 프롬프트 복사</button>
 """
-    components.html(html, height=62)
+    components.html(html, height=60)
 
 
 def collect_and_build(ticker: str, market: str) -> dict | None:
@@ -140,11 +163,11 @@ def collect_and_build(ticker: str, market: str) -> dict | None:
     info = collector.get_info(ticker)
     company_name = info.get("shortName") or info.get("longName") or ticker
 
-    # News (best-effort, never blocks)
+    # News (best-effort, never blocks) — 24h window
     articles: list[dict] = []
     try:
         news_col = NewsCollector()
-        raw_articles = news_col.fetch_by_ticker(ticker, market, hours=48)
+        raw_articles = news_col.fetch_by_ticker(ticker, market, hours=24)
         articles = news_col.to_dicts(raw_articles)
     except Exception:
         pass
@@ -169,6 +192,7 @@ def collect_and_build(ticker: str, market: str) -> dict | None:
         "t_score": t_score,
         "last_row": last_row.to_dict(),
         "macd_cross": macd_cross,
+        "articles": articles,
         "news_count": len(articles),
         "generated_at": datetime.now().strftime("%H:%M:%S"),
     }
@@ -192,7 +216,7 @@ with st.sidebar:
         else:
             resolved_market = market_sel
 
-    analyze_clicked = st.button("📊 분석 시작", use_container_width=True, type="primary")
+    analyze_clicked = st.button("📊 분석 시작", width="stretch", type="primary")
 
     st.divider()
     st.subheader("🧠 투자 메모리")
@@ -204,7 +228,7 @@ with st.sidebar:
     c3.metric("활성 규칙", stats["active_rules"])
     c4.metric("패턴", stats["patterns"])
 
-    if st.button("🔄 패턴 재분석", use_container_width=True):
+    if st.button("🔄 패턴 재분석", width="stretch"):
         r = pattern_analyzer.analyze_patterns()
         st.success(f"패턴 {r['patterns']}개 / 규칙 {r['rules']}개 업데이트")
 
@@ -279,13 +303,32 @@ m4.metric("MACD", "골든크로스" if macd_v > macd_s else "데드크로스")
 
 st.divider()
 
+# ── News headlines (참고용, 분석 흐름과 독립) ────────────────────────────────
+articles = pd.get("articles", [])
+if articles:
+    with st.expander(f"📰 최근 뉴스 헤드라인 ({len(articles)}건, 최근 24시간)", expanded=False):
+        for i, a in enumerate(articles[:10], 1):
+            pub = a.get("published_at", "")[:10] if a.get("published_at") else ""
+            source = a.get("source", "")
+            title = a.get("title", "")
+            url = a.get("url", "")
+            if url:
+                st.markdown(f"{i}. **[{source}]** [{title}]({url}) <small>{pub}</small>", unsafe_allow_html=True)
+            else:
+                st.markdown(f"{i}. **[{source}]** {title} <small>{pub}</small>", unsafe_allow_html=True)
+else:
+    with st.expander("📰 최근 뉴스 헤드라인 (0건)", expanded=False):
+        st.caption("최근 24시간 내 관련 뉴스를 찾을 수 없습니다.")
+
+st.divider()
+
 # Prompt preview (collapsible) + copy button
 with st.expander("📄 프롬프트 내용 미리보기", expanded=False):
     st.code(prompt, language="markdown")
 
 st.markdown("**Claude.ai에 붙여넣을 프롬프트가 준비됐습니다. 아래 버튼을 클릭하세요:**")
 copy_open_button(prompt)
-st.caption("버튼 클릭 → 프롬프트 자동 복사 + claude.ai 새 탭 열림 → Ctrl+V → 전송")
+st.caption("버튼 클릭 후 Claude.ai에서 직접 붙여넣어주세요 (Ctrl+V)")
 
 st.divider()
 
@@ -309,10 +352,14 @@ if paste_text.strip():
     # Auto-parse result display
     st.markdown("---")
     sig_color = {"BUY": "🟢", "SELL": "🔴", "HOLD": "🟡"}.get(parsed.signal, "⚪")
-    r1, r2, r3 = st.columns(3)
+    sent_emoji = {"positive": "😀 긍정", "negative": "😟 부정", "neutral": "😐 중립"}.get(
+        parsed.sentiment or "neutral", "😐 중립"
+    )
+    r1, r2, r3, r4 = st.columns(4)
     r1.metric("감지된 시그널", f"{sig_color} {parsed.signal}")
     r2.metric("확신도", f"{parsed.confidence:.0%}")
-    r3.metric(
+    r3.metric("뉴스 감성", sent_emoji)
+    r4.metric(
         "목표가",
         f"{parsed.price_target:,.0f}" if parsed.price_target else "—",
     )
@@ -352,7 +399,7 @@ if paste_text.strip():
             placeholder="예: RSI 과매도 + 실적 기대감",
         )
 
-        save_btn = st.form_submit_button("✅ 저장하기", use_container_width=True, type="primary")
+        save_btn = st.form_submit_button("✅ 저장하기", width="stretch", type="primary")
 
         if save_btn:
             try:
@@ -375,6 +422,7 @@ if paste_text.strip():
                     "confidence": parsed.confidence,
                     "price_target": parsed.price_target,
                     "news_count": pd["news_count"],
+                    "news_sentiment": parsed.sentiment or "neutral",
                 },
             )
             st.session_state.last_saved = (

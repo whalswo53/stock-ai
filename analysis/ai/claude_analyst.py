@@ -84,22 +84,20 @@ class ClaudeAnalyst:
         except (TypeError, ValueError):
             rsi_zone = "N/A"
 
-        # News section
+        # News section (top 5 headlines, 24h window)
         if news_articles:
-            news_lines = [f"## 최근 뉴스 ({len(news_articles)}건, 최근 48시간)"]
-            for i, a in enumerate(news_articles[:10], 1):
+            top5 = news_articles[:5]
+            news_lines = [f"## 최근 뉴스 헤드라인 (상위 5건, 최근 24시간)"]
+            for i, a in enumerate(top5, 1):
                 pub = a.get("published_at", "")[:10] if a.get("published_at") else ""
-                summary = a.get("summary", "")[:100]
                 news_lines.append(
                     f"{i}. [{a.get('source', '')}] {a.get('title', '')} ({pub})"
-                    + (f"\n   → {summary}" if summary else "")
                 )
             news_section = "\n".join(news_lines)
         else:
             news_section = (
-                "## 최근 뉴스\n"
-                "관련 뉴스를 찾을 수 없었습니다. "
-                "직접 최신 뉴스를 확인하여 분석에 참고해주세요."
+                "## 최근 뉴스 헤드라인\n"
+                "최근 24시간 내 관련 뉴스를 찾을 수 없었습니다."
             )
 
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -142,7 +140,7 @@ class ClaudeAnalyst:
 위 데이터를 종합하여 다음을 포함한 분석을 작성해주세요:
 
 1. **기술적 지표 해석** — RSI·MACD·MA·볼린저밴드가 가리키는 방향
-2. **뉴스 감성 분석** — 뉴스가 주가에 미칠 영향
+2. **뉴스 감성 분석** — 위 5개 헤드라인을 종합한 감성 판단 (positive / neutral / negative) 및 주가 영향
 3. **투자 의견** — BUY / SELL / HOLD 중 하나, 명확한 근거와 함께
 4. **리스크 요인** — 반드시 확인해야 할 위험 요소
 5. **목표가** — 현실적인 수치 (없다면 null)
@@ -154,6 +152,7 @@ class ClaudeAnalyst:
   "signal": "BUY 또는 SELL 또는 HOLD",
   "confidence": 0.0에서1.0 사이 숫자,
   "price_target": 목표가숫자또는null,
+  "sentiment": "positive 또는 neutral 또는 negative",
   "reasons": ["핵심 이유 1", "핵심 이유 2", "핵심 이유 3"],
   "report_md": "## 분석 요약\\n마크다운 형식 상세 내용"
 }}
@@ -213,6 +212,9 @@ class ClaudeAnalyst:
         except (TypeError, ValueError):
             price_target = None
 
+        sentiment_raw = str(data.get("sentiment", "neutral")).lower()
+        sentiment = sentiment_raw if sentiment_raw in {"positive", "neutral", "negative"} else "neutral"
+
         report_md = str(data.get("report_md", raw))
 
         return AnalysisResult(
@@ -222,4 +224,5 @@ class ClaudeAnalyst:
             reasons=reasons,
             report_md=report_md,
             price_target=price_target,
+            sentiment=sentiment,
         )

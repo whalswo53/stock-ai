@@ -40,7 +40,7 @@ def _show_login() -> None:
 
         with st.form("login_form"):
             password = st.text_input("비밀번호", type="password")
-            submitted = st.form_submit_button("로그인", use_container_width=True)
+            submitted = st.form_submit_button("로그인", width="stretch")
 
         if submitted:
             if _APP_PASSWORD and password == _APP_PASSWORD:
@@ -57,7 +57,7 @@ if not st.session_state.get("authenticated", False):
 # Authenticated: render logout button before handing off to page runner
 with st.sidebar:
     st.divider()
-    if st.button("로그아웃", use_container_width=True):
+    if st.button("로그아웃", width="stretch"):
         st.session_state["authenticated"] = False
         st.rerun()
 

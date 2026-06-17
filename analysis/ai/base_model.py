@@ -15,6 +15,7 @@ class AnalysisResult:
     reasons: list[str] = field(default_factory=list)
     report_md: str = ""
     price_target: Optional[float] = None
+    sentiment: Optional[str] = None   # "positive" | "neutral" | "negative"
 
 
 class AIModel(ABC):

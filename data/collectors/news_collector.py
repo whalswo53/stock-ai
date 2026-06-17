@@ -27,7 +27,7 @@ class Article:
 
 
 class NewsCollector:
-    def __init__(self, hours_default: int = 48) -> None:
+    def __init__(self, hours_default: int = 24) -> None:
         self._hours_default = hours_default
 
     # ── Public interface ──────────────────────────────────────────────────────
@@ -36,7 +36,7 @@ class NewsCollector:
         self,
         ticker: str,
         market: str = "NASDAQ",
-        hours: int = 48,
+        hours: int = 24,
     ) -> list[Article]:
         """Fetches news for a single ticker. Returns deduplicated list."""
         articles: list[Article] = []
