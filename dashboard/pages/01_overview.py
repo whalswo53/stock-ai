@@ -15,6 +15,7 @@ from data.collectors.market_sentiment import MarketSentimentCollector, score_to_
 from analysis.technical.indicators import TechnicalIndicators
 from config.sources import TICKER_KR_NAME
 from utils.ticker_utils import detect_market, is_kr
+from utils.search_widget import ticker_search_widget
 
 # ── Color palette ─────────────────────────────────────────────────────────────
 UP_COLOR = "#26a69a"
@@ -30,11 +31,13 @@ with st.sidebar:
 
     # Accept ticker pre-fill from portfolio page jump
     _jump = st.session_state.pop("portfolio_jump_ticker", None)
-    ticker = st.text_input(
-        "종목 코드 또는 한글명",
-        value=_jump or "005930.KS",
-        placeholder="예: 005930.KS · 삼성전자 · AAPL · 엔비디아",
-    ).strip()
+    if _jump:
+        st.session_state["_tsq_overview"] = _jump
+    ticker = ticker_search_widget(
+        key="overview",
+        label="종목 코드 또는 한글명",
+        default="005930.KS",
+    ) or "005930.KS"
 
     period_label = st.selectbox("기간", list(PERIOD_OPTIONS.keys()), index=2)
     period = PERIOD_OPTIONS[period_label]
@@ -55,8 +58,7 @@ with st.sidebar:
     show_bb = st.checkbox("볼린저밴드 (BB)", value=False)
 
     st.divider()
-    st.caption("🇰🇷 예시: 005930.KS · 000660.KS · 삼성전자")
-    st.caption("🇺🇸 예시: AAPL · MSFT · NVDA")
+    st.caption("🔍 한글·영문 이름 또는 티커 직접 입력 후 목록에서 선택")
 
 
 # ── Market auto-detected from ticker ─────────────────────────────────────────

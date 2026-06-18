@@ -25,6 +25,7 @@ from data.collectors.market_sentiment import MarketSentimentCollector, prompt_sn
 from data.collectors.price_collector import PriceCollector
 from utils.ticker_utils import resolve_ticker as _resolve_base, detect_market, is_kr, fmt_price
 from utils.clipboard import copy_button
+from utils.search_widget import ticker_search_widget
 
 # ── Scalping parameters ────────────────────────────────────────────────────────
 ST_MA_WINDOWS  = [5, 10, 20]          # 단기 이동평균
@@ -219,11 +220,13 @@ with st.sidebar:
     st.title("⚡ 단타 설정")
 
     _jump = st.session_state.pop("portfolio_jump_ticker", None)
-    raw_input = st.text_input(
-        "종목 코드 또는 한글명",
-        value=_jump or "005930.KS",
-        placeholder="예: 005930.KS · 삼성전자 · AAPL",
-    ).strip()
+    if _jump:
+        st.session_state["_tsq_scalping"] = _jump
+    raw_input = ticker_search_widget(
+        key="scalping",
+        label="종목 코드 또는 한글명",
+        default="005930.KS",
+    ) or "005930.KS"
 
     period_label = st.selectbox("조회 기간", list(PERIOD_OPTIONS.keys()), index=0)
     period = PERIOD_OPTIONS[period_label]
@@ -246,7 +249,7 @@ with st.sidebar:
 
 
 # ── Resolve ticker ─────────────────────────────────────────────────────────────
-ticker = _resolve(raw_input)
+ticker = raw_input  # search_widget이 이미 resolve한 티커
 market = detect_market(ticker)
 kr     = is_kr(ticker)
 

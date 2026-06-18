@@ -23,6 +23,7 @@ from memory.user_memory import UserMemory
 from memory.pattern_analyzer import PatternAnalyzer
 from utils.ticker_utils import detect_market, resolve_ticker as _resolve_base
 from utils.clipboard import copy_button as _copy_button
+from utils.search_widget import ticker_search_widget
 
 # ── Session state ─────────────────────────────────────────────────────────────
 if "prompt_data" not in st.session_state:
@@ -122,16 +123,10 @@ def collect_and_build(ticker: str, market: str) -> dict | None:
 with st.sidebar:
     st.header("⚙️ 종목 분석")
 
-    ticker_input = st.text_input(
-        "종목 코드 또는 한글 이름",
-        placeholder="예: 삼성전자 / 005930.KS / NVDA / 엔비디아",
+    ticker_input = ticker_search_widget(
+        key="chat",
+        label="종목 코드 또는 한글 이름",
     )
-
-    # Preview resolved ticker (market auto-detected from ticker format)
-    if ticker_input.strip():
-        resolved, resolved_market = resolve_ticker(ticker_input)
-        if resolved != ticker_input.strip().upper():
-            st.caption(f"→ 인식된 티커: **{resolved}** ({resolved_market})")
 
     analyze_clicked = st.button("📊 분석 시작", width="stretch", type="primary")
 
@@ -166,10 +161,11 @@ with st.sidebar:
 
 # ── Trigger analysis ──────────────────────────────────────────────────────────
 if analyze_clicked:
-    if not ticker_input.strip():
+    if not ticker_input:
         st.warning("종목 코드 또는 이름을 입력하세요.")
     else:
-        resolved, resolved_market = resolve_ticker(ticker_input)
+        resolved = ticker_input
+        resolved_market = detect_market(resolved)
         with st.spinner(f"📡 {resolved} 데이터 수집 중… (가격 + 지표 + 뉴스)"):
             data = collect_and_build(resolved, resolved_market)
         if data:
