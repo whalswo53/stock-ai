@@ -31,6 +31,7 @@ class ClaudeAnalyst:
         df: pd.DataFrame,
         news_articles: Optional[list[dict]] = None,
         market: str = "",
+        market_sentiment: str = "",
     ) -> str:
         """
         Returns a self-contained analysis prompt ready to paste into claude.ai.
@@ -102,13 +103,14 @@ class ClaudeAnalyst:
 
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
         market_label = f" ({market})" if market else ""
+        sentiment_line = f"\n**시장 전반 분위기:** {market_sentiment}\n" if market_sentiment else ""
 
         prompt = f"""# 주식 분석 요청 — {ticker}{market_label}
 
 당신은 전문 주식 투자 분석가입니다. 아래 실시간 데이터를 바탕으로 **{ticker}** 종목을 심층 분석하고, 구체적인 투자 의견을 제시해주세요.
 
 **분석 시각:** {now}
-
+{sentiment_line}
 ---
 
 ## 현재 기술적 지표

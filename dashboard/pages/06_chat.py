@@ -47,21 +47,23 @@ pattern_analyzer = get_pattern_analyzer()
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def resolve_ticker(raw: str, market: str) -> tuple[str, str]:
+def resolve_ticker(raw: str) -> tuple[str, str]:
     """
-    Resolves Korean company name or raw ticker code to (ticker, market).
-    Returns (raw, market) unchanged if no mapping found.
+    Resolves Korean company name or raw ticker to (ticker, market).
+    Market is auto-detected from ticker suffix: .KS→KOSPI, .KQ→KOSDAQ, else NASDAQ.
     """
     raw = raw.strip()
 
-    # Already a ticker code — pass through
+    # Already a Korean numeric ticker
     if re.match(r"^\d{6}\.(KS|KQ)$", raw, re.IGNORECASE):
         mkt = "KOSDAQ" if raw.upper().endswith(".KQ") else "KOSPI"
         return raw.upper(), mkt
-    if re.match(r"^[A-Z]{1,5}$", raw):
-        return raw.upper(), market
 
-    # Korean name lookup
+    # Already a US ticker (letters only, 1-5 chars)
+    if re.match(r"^[A-Z]{1,5}$", raw, re.IGNORECASE):
+        return raw.upper(), "NASDAQ"
+
+    # Korean name lookup (longest match first to avoid prefix conflicts)
     sorted_kospi = sorted(KOSPI_TICKER_MAP.keys(), key=len, reverse=True)
     for name in sorted_kospi:
         if name in raw:
@@ -73,7 +75,9 @@ def resolve_ticker(raw: str, market: str) -> tuple[str, str]:
         if name in raw:
             return NASDAQ_TICKER_MAP[name], "NASDAQ"
 
-    return raw, market
+    # Fallback: if input has Korean characters assume Korean market
+    has_korean = any("가" <= c <= "힣" for c in raw)
+    return raw, "KOSPI" if has_korean else "NASDAQ"
 
 
 def copy_open_button(prompt: str) -> None:
@@ -146,9 +150,11 @@ def copy_open_button(prompt: str) -> None:
 
 def collect_and_build(ticker: str, market: str) -> dict | None:
     """
-    Fetches price data + news, computes indicators, builds prompt.
+    Fetches price data + news + Fear&Greed, builds prompt.
     Returns a dict with all context needed for the page, or None on failure.
     """
+    from data.collectors.market_sentiment import MarketSentimentCollector, prompt_snippet
+
     collector = PriceCollector()
     df = collector.fetch(ticker, period="6mo")
     if df.empty:
@@ -172,8 +178,16 @@ def collect_and_build(ticker: str, market: str) -> dict | None:
     except Exception:
         pass
 
+    # Fear & Greed (best-effort)
+    fg_text = ""
+    try:
+        fg = MarketSentimentCollector().fetch()
+        fg_text = prompt_snippet(fg)
+    except Exception:
+        pass
+
     analyst = ClaudeAnalyst(memory=memory)
-    prompt = analyst.build_prompt(ticker, df, articles, market)
+    prompt = analyst.build_prompt(ticker, df, articles, market, fg_text)
 
     # MACD cross label for DB record
     try:
@@ -201,20 +215,16 @@ def collect_and_build(ticker: str, market: str) -> dict | None:
 with st.sidebar:
     st.header("⚙️ 종목 분석")
 
-    market_sel = st.radio("시장", ["KOSPI", "NASDAQ", "KOSDAQ"], horizontal=True)
-
     ticker_input = st.text_input(
         "종목 코드 또는 한글 이름",
-        placeholder="예: 삼성전자 / 005930.KS / NVDA",
+        placeholder="예: 삼성전자 / 005930.KS / NVDA / 엔비디아",
     )
 
-    # Preview resolved ticker
+    # Preview resolved ticker (market auto-detected from ticker format)
     if ticker_input.strip():
-        resolved, resolved_market = resolve_ticker(ticker_input, market_sel)
-        if resolved != ticker_input.strip():
+        resolved, resolved_market = resolve_ticker(ticker_input)
+        if resolved != ticker_input.strip().upper():
             st.caption(f"→ 인식된 티커: **{resolved}** ({resolved_market})")
-        else:
-            resolved_market = market_sel
 
     analyze_clicked = st.button("📊 분석 시작", width="stretch", type="primary")
 
@@ -252,7 +262,7 @@ if analyze_clicked:
     if not ticker_input.strip():
         st.warning("종목 코드 또는 이름을 입력하세요.")
     else:
-        resolved, resolved_market = resolve_ticker(ticker_input, market_sel)
+        resolved, resolved_market = resolve_ticker(ticker_input)
         with st.spinner(f"📡 {resolved} 데이터 수집 중… (가격 + 지표 + 뉴스)"):
             data = collect_and_build(resolved, resolved_market)
         if data:

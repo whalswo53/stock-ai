@@ -6,12 +6,12 @@ if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
 import pandas as pd
-import numpy as np
 import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from data.collectors.price_collector import PriceCollector
+from data.collectors.market_sentiment import MarketSentimentCollector, score_to_color
 from analysis.technical.indicators import TechnicalIndicators
 from config.sources import TICKER_KR_NAME
 
@@ -22,14 +22,31 @@ MA_COLORS = {5: "#FF9800", 20: "#2196F3", 60: "#9C27B0", 120: "#F44336"}
 
 PERIOD_OPTIONS = {"3개월": "3mo", "6개월": "6mo", "1년": "1y", "2년": "2y"}
 
+
+# ── Market auto-detection ──────────────────────────────────────────────────────
+def _detect_market(ticker: str) -> str:
+    t = ticker.upper()
+    if t.endswith(".KS"):
+        return "KOSPI"
+    if t.endswith(".KQ"):
+        return "KOSDAQ"
+    return "NASDAQ"
+
+
+def _is_kr(ticker: str) -> bool:
+    t = ticker.upper()
+    return t.endswith(".KS") or t.endswith(".KQ")
+
+
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.title("⚙️ 설정")
 
-    market = st.radio("시장", ["KOSPI", "NASDAQ"], horizontal=True)
-
-    default_ticker = "005930.KS" if market == "KOSPI" else "AAPL"
-    ticker = st.text_input("종목 코드", value=default_ticker).strip()
+    ticker = st.text_input(
+        "종목 코드 또는 한글명",
+        value="005930.KS",
+        placeholder="예: 005930.KS · 삼성전자 · AAPL · 엔비디아",
+    ).strip()
 
     period_label = st.selectbox("기간", list(PERIOD_OPTIONS.keys()), index=2)
     period = PERIOD_OPTIONS[period_label]
@@ -50,8 +67,13 @@ with st.sidebar:
     show_bb = st.checkbox("볼린저밴드 (BB)", value=False)
 
     st.divider()
-    st.caption("KOSPI 예시: 005930.KS, 000660.KS")
-    st.caption("NASDAQ 예시: AAPL, MSFT, NVDA")
+    st.caption("🇰🇷 예시: 005930.KS · 000660.KS · 삼성전자")
+    st.caption("🇺🇸 예시: AAPL · MSFT · NVDA")
+
+
+# ── Market auto-detected from ticker ─────────────────────────────────────────
+market = _detect_market(ticker)
+kr = _is_kr(ticker)
 
 
 # ── Data loading (cached) ─────────────────────────────────────────────────────
@@ -68,6 +90,12 @@ def load_info(ticker: str) -> dict:
     return PriceCollector().get_info(ticker)
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_fear_greed() -> dict:
+    fg = MarketSentimentCollector().fetch()
+    return {"score": fg.score, "label": fg.label, "vix": fg.vix, "source": fg.source}
+
+
 with st.spinner(f"'{ticker}' 데이터 불러오는 중…"):
     df = load_ohlcv(ticker, period)
     info = load_info(ticker)
@@ -77,9 +105,76 @@ if df.empty:
     st.stop()
 
 
+# ── Fear & Greed gauge ────────────────────────────────────────────────────────
+def _build_fg_gauge(score: int, label: str) -> go.Figure:
+    fig = go.Figure(go.Indicator(
+        mode="gauge+number",
+        value=score,
+        domain={"x": [0, 1], "y": [0, 1]},
+        title={
+            "text": f"공포·탐욕 지수 — <b>{label}</b>",
+            "font": {"size": 13, "color": "#ccc"},
+        },
+        number={"font": {"size": 40, "color": "white"}},
+        gauge={
+            "axis": {
+                "range": [0, 100],
+                "tickvals": [0, 20, 40, 60, 80, 100],
+                "tickcolor": "#666",
+                "tickwidth": 1,
+            },
+            "bar": {"color": "white", "thickness": 0.025},
+            "bgcolor": "rgba(0,0,0,0)",
+            "borderwidth": 0,
+            "steps": [
+                {"range": [0,  20], "color": "#c62828"},
+                {"range": [20, 40], "color": "#e64a19"},
+                {"range": [40, 60], "color": "#f9a825"},
+                {"range": [60, 80], "color": "#558b2f"},
+                {"range": [80, 100], "color": "#00695c"},
+            ],
+        },
+    ))
+    fig.update_layout(
+        height=200,
+        margin=dict(l=30, r=30, t=40, b=10),
+        paper_bgcolor="rgba(0,0,0,0)",
+        font={"color": "white"},
+    )
+    return fig
+
+
+fg = load_fear_greed()
+fg_score = fg["score"]
+fg_label = fg["label"]
+fg_color = score_to_color(fg_score)
+
+with st.container():
+    c_gauge, c_legend = st.columns([1, 1])
+    with c_gauge:
+        st.plotly_chart(_build_fg_gauge(fg_score, fg_label), width="stretch")
+    with c_legend:
+        st.markdown("")
+        st.markdown("")
+        if fg["vix"] >= 0:
+            st.metric("VIX", f"{fg['vix']:.1f}")
+        st.caption(fg["source"])
+        st.markdown(
+            "| 점수 | 분위기 |\n"
+            "|------|--------|\n"
+            "| 0–20 | 🔴 극도의 공포 |\n"
+            "| 21–40 | 🟠 공포 |\n"
+            "| 41–60 | 🟡 중립 |\n"
+            "| 61–80 | 🟢 탐욕 |\n"
+            "| 81–100 | 🟩 극도의 탐욕 |"
+        )
+
+st.divider()
+
+
 # ── Header: company name + key metrics ───────────────────────────────────────
 company_name = TICKER_KR_NAME.get(ticker) or info.get("shortName") or info.get("longName") or ticker
-currency = "KRW" if market == "KOSPI" else "USD"
+currency = "KRW" if kr else "USD"
 
 last = df.iloc[-1]
 prev = df.iloc[-2] if len(df) > 1 else last
@@ -93,7 +188,7 @@ period_low = df["Low"].min()
 
 
 def fmt_price(val: float) -> str:
-    return f"₩{val:,.0f}" if market == "KOSPI" else f"${val:,.2f}"
+    return f"₩{val:,.0f}" if kr else f"${val:,.2f}"
 
 
 def fmt_volume(vol: float) -> str:
@@ -127,7 +222,7 @@ def build_chart(df: pd.DataFrame) -> go.Figure:
         row_heights=[0.52, 0.16, 0.16, 0.16],
         specs=[
             [{"secondary_y": False}],
-            [{"secondary_y": True}],   # volume (primary) + OBV (secondary)
+            [{"secondary_y": True}],
             [{"secondary_y": False}],
             [{"secondary_y": False}],
         ],
@@ -148,7 +243,6 @@ def build_chart(df: pd.DataFrame) -> go.Figure:
         row=1, col=1,
     )
 
-    # MA overlays
     for w in ma_windows:
         col = f"MA{w}"
         if col in df.columns:
@@ -162,7 +256,6 @@ def build_chart(df: pd.DataFrame) -> go.Figure:
                 row=1, col=1,
             )
 
-    # Bollinger Bands — Upper first, then Lower with fill toward Upper
     if show_bb:
         fig.add_trace(
             go.Scatter(
@@ -284,7 +377,7 @@ def build_chart(df: pd.DataFrame) -> go.Figure:
     )
 
     # ── Layout ───────────────────────────────────────────────────────────
-    tick_fmt = ",.0f" if market == "KOSPI" else ".2f"
+    tick_fmt = ",.0f" if kr else ".2f"
     fig.update_layout(
         height=880,
         template="plotly_dark",
@@ -322,7 +415,6 @@ st.subheader("기술적 시그널 요약")
 latest = df.iloc[-1]
 s1, s2, s3 = st.columns(3)
 
-# RSI
 rsi_val = latest["RSI"]
 if pd.isna(rsi_val):
     rsi_label, rsi_delta = "데이터 부족", None
@@ -334,7 +426,6 @@ else:
     rsi_label, rsi_delta = f"{rsi_val:.1f}", "중립"
 s1.metric("RSI (14)", rsi_label, rsi_delta)
 
-# MACD
 macd_val, macd_sig = latest["MACD"], latest["MACD_Signal"]
 if pd.isna(macd_val) or pd.isna(macd_sig):
     macd_label, macd_delta = "데이터 부족", None
@@ -344,7 +435,6 @@ else:
     macd_label, macd_delta = f"{macd_val:.4f}", "데드크로스 (하락)"
 s2.metric("MACD", macd_label, macd_delta)
 
-# MA5 vs MA20
 ma5, ma20 = latest.get("MA5"), latest.get("MA20")
 if ma5 is None or ma20 is None or pd.isna(ma5) or pd.isna(ma20):
     ma_label, ma_delta = "데이터 부족", None
@@ -354,15 +444,11 @@ else:
     ma_label, ma_delta = f"{fmt_price(ma5)}", "단기 하락 추세"
 s3.metric("MA5 vs MA20", ma_label, ma_delta)
 
-# Recent data table (last 10 rows)
 with st.expander("최근 가격 데이터"):
     display = df[["Open", "High", "Low", "Close", "Volume"]].tail(10).copy()
     display.index = display.index.strftime("%Y-%m-%d")
-    if market == "KOSPI":
-        for col in ["Open", "High", "Low", "Close"]:
-            display[col] = display[col].map(lambda x: f"₩{x:,.0f}")
-    else:
-        for col in ["Open", "High", "Low", "Close"]:
-            display[col] = display[col].map(lambda x: f"${x:,.2f}")
+    price_fmt = (lambda x: f"₩{x:,.0f}") if kr else (lambda x: f"${x:,.2f}")
+    for col in ["Open", "High", "Low", "Close"]:
+        display[col] = display[col].map(price_fmt)
     display["Volume"] = display["Volume"].map(fmt_volume)
     st.dataframe(display, width="stretch")
