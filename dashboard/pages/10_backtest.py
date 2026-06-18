@@ -5,7 +5,6 @@
 """
 from __future__ import annotations
 
-import re
 import sys
 from datetime import date
 from pathlib import Path
@@ -23,8 +22,8 @@ from plotly.subplots import make_subplots
 
 from analysis.backtest.engine import BacktestEngine, BacktestResult, benchmark_equity
 from analysis.backtest.strategies import STRATEGIES, generate_signals
-from config.sources import KOSPI_TICKER_MAP, NASDAQ_TICKER_MAP, TICKER_KR_NAME
 from data.collectors.price_collector import PriceCollector
+from utils.ticker_utils import resolve_ticker as _resolve, is_kr as _is_kr
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 PERIOD_OPTIONS = {"1년": ("2y", 1), "3년": ("4y", 3), "5년": ("6y", 5)}
@@ -38,26 +37,8 @@ STRATEGY_COLORS = {
 }
 BENCHMARK_COLOR = "#aaaaaa"
 
-_NAME_TO_TICKER: dict[str, str] = {**KOSPI_TICKER_MAP, **NASDAQ_TICKER_MAP}
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
-def _resolve(raw: str) -> str:
-    raw = raw.strip()
-    if re.match(r"^\d{6}\.(KS|KQ)$", raw, re.IGNORECASE):
-        return raw.upper()
-    if re.match(r"^[A-Z]{1,5}$", raw, re.IGNORECASE):
-        return raw.upper()
-    for name in sorted(_NAME_TO_TICKER, key=len, reverse=True):
-        if name in raw:
-            return _NAME_TO_TICKER[name]
-    return raw.upper()
-
-
-def _is_kr(ticker: str) -> bool:
-    return ticker.upper().endswith((".KS", ".KQ"))
-
 
 def _benchmark_ticker(ticker: str) -> str:
     return "^KS11" if _is_kr(ticker) else "QQQ"
@@ -316,7 +297,7 @@ with tab_summary:
         "알파(벤치마크대비)": "0.0%",
     })
 
-    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
     # ── 평가 기준 범례 ────────────────────────────────────────────────────────
     with st.expander("📖 평가 기준"):
@@ -436,7 +417,7 @@ with tab_risk:
             "평균 보유 기간": f"{avg_hold:.0f}일",
         })
 
-    st.dataframe(pd.DataFrame(risk_rows), hide_index=True, use_container_width=True)
+    st.dataframe(pd.DataFrame(risk_rows), hide_index=True, width="stretch")
 
     st.caption(
         "**MDD 해석**: 투자 기간 중 최고점 대비 최대 하락폭. "
@@ -518,7 +499,7 @@ with tab_heatmap:
                     axis=1,
                 ).values,
             })
-            st.dataframe(ann_df, hide_index=True, use_container_width=True)
+            st.dataframe(ann_df, hide_index=True, width="stretch")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -579,7 +560,7 @@ with tab_trades:
             df_trades.style
             .map(_color_ret, subset=["수익률", "손익"])
             .format({"수익률": "{:+.2f}%", "손익": fmt_price}),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 

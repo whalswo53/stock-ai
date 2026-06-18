@@ -3,8 +3,6 @@ Claude.ai 연동 종목 분석 페이지.
 흐름: 종목 입력 → 데이터 수집 → 프롬프트 생성 → 클립보드 복사 + claude.ai 열기 → 답변 붙여넣기 → DB 저장
 """
 
-import base64
-import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -14,16 +12,17 @@ if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
 import streamlit as st
-import streamlit.components.v1 as components
 
-from config.sources import KOSPI_TICKER_MAP, NASDAQ_TICKER_MAP
 from data.collectors.price_collector import PriceCollector
 from data.collectors.news_collector import NewsCollector
+from data.collectors.market_sentiment import MarketSentimentCollector, prompt_snippet
 from analysis.technical.indicators import TechnicalIndicators
 from analysis.technical.signals import score as tech_score
 from analysis.ai.claude_analyst import ClaudeAnalyst
 from memory.user_memory import UserMemory
 from memory.pattern_analyzer import PatternAnalyzer
+from utils.ticker_utils import detect_market, resolve_ticker as _resolve_base
+from utils.clipboard import copy_button as _copy_button
 
 # ── Session state ─────────────────────────────────────────────────────────────
 if "prompt_data" not in st.session_state:
@@ -49,103 +48,15 @@ pattern_analyzer = get_pattern_analyzer()
 
 def resolve_ticker(raw: str) -> tuple[str, str]:
     """
-    Resolves Korean company name or raw ticker to (ticker, market).
-    Market is auto-detected from ticker suffix: .KS→KOSPI, .KQ→KOSDAQ, else NASDAQ.
+    한글 회사명 또는 원시 입력을 (ticker, market) 튜플로 변환한다.
+    시장은 티커 접미사로 자동 감지: .KS→KOSPI, .KQ→KOSDAQ, else→NASDAQ.
     """
-    raw = raw.strip()
-
-    # Already a Korean numeric ticker
-    if re.match(r"^\d{6}\.(KS|KQ)$", raw, re.IGNORECASE):
-        mkt = "KOSDAQ" if raw.upper().endswith(".KQ") else "KOSPI"
-        return raw.upper(), mkt
-
-    # Already a US ticker (letters only, 1-5 chars)
-    if re.match(r"^[A-Z]{1,5}$", raw, re.IGNORECASE):
-        return raw.upper(), "NASDAQ"
-
-    # Korean name lookup (longest match first to avoid prefix conflicts)
-    sorted_kospi = sorted(KOSPI_TICKER_MAP.keys(), key=len, reverse=True)
-    for name in sorted_kospi:
-        if name in raw:
-            t = KOSPI_TICKER_MAP[name]
-            return t, "KOSDAQ" if t.endswith(".KQ") else "KOSPI"
-
-    sorted_nasdaq = sorted(NASDAQ_TICKER_MAP.keys(), key=len, reverse=True)
-    for name in sorted_nasdaq:
-        if name in raw:
-            return NASDAQ_TICKER_MAP[name], "NASDAQ"
-
-    # Fallback: if input has Korean characters assume Korean market
-    has_korean = any("가" <= c <= "힣" for c in raw)
-    return raw, "KOSPI" if has_korean else "NASDAQ"
+    ticker = _resolve_base(raw)
+    return ticker, detect_market(ticker)
 
 
 def copy_open_button(prompt: str) -> None:
-    """Renders a button that copies the prompt to clipboard."""
-    b64 = base64.b64encode(prompt.encode("utf-8")).decode("ascii")
-    html = f"""
-<meta charset="utf-8">
-<style>
-  body {{ margin: 0; padding: 0; }}
-  .claude-btn {{
-    background: linear-gradient(135deg, #7C3AED 0%, #5B21B6 100%);
-    color: #fff;
-    border: none;
-    padding: 14px 0;
-    border-radius: 10px;
-    font-size: 17px;
-    font-weight: 700;
-    cursor: pointer;
-    width: 100%;
-    letter-spacing: 0.3px;
-    transition: opacity .15s;
-  }}
-  .claude-btn:hover {{ opacity: .88; }}
-  .claude-btn:active {{ opacity: .75; transform: scale(.99); }}
-</style>
-<button class="claude-btn" onclick="(function(btn){{
-  var bytes = Uint8Array.from(atob('{b64}'), function(c) {{ return c.charCodeAt(0); }});
-  var text = new TextDecoder('utf-8').decode(bytes);
-
-  function markDone() {{
-    btn.textContent = '✅ 복사됐습니다. Claude.ai에서 직접 붙여넣어주세요';
-    setTimeout(function() {{ btn.textContent = '📋 프롬프트 복사'; }}, 4000);
-  }}
-
-  function fallbackCopy(t) {{
-    var doc = (window.parent && window.parent !== window && window.parent.document)
-      ? window.parent.document : document;
-    var ta = doc.createElement('textarea');
-    ta.value = t;
-    ta.style.cssText = 'position:fixed;opacity:0;top:0;left:0;';
-    doc.body.appendChild(ta);
-    ta.focus(); ta.select();
-    try {{
-      var ok = doc.execCommand('copy');
-      if (!ok) {{ console.error('[Copy] execCommand returned false'); }}
-    }} catch(e) {{
-      console.error('[Copy] execCommand failed:', e);
-    }}
-    doc.body.removeChild(ta);
-    markDone();
-  }}
-
-  var targetNav = (window.parent && window.parent !== window && window.parent.navigator)
-    ? window.parent.navigator : navigator;
-
-  if (targetNav.clipboard && targetNav.clipboard.writeText) {{
-    targetNav.clipboard.writeText(text)
-      .then(function() {{ markDone(); }})
-      .catch(function(err) {{
-        console.error('[Copy] Clipboard API failed:', err);
-        fallbackCopy(text);
-      }});
-  }} else {{
-    fallbackCopy(text);
-  }}
-}})(this)">📋 프롬프트 복사</button>
-"""
-    components.html(html, height=60)
+    _copy_button(prompt, "📋 프롬프트 복사", height=60)
 
 
 def collect_and_build(ticker: str, market: str) -> dict | None:
@@ -153,8 +64,6 @@ def collect_and_build(ticker: str, market: str) -> dict | None:
     Fetches price data + news + Fear&Greed, builds prompt.
     Returns a dict with all context needed for the page, or None on failure.
     """
-    from data.collectors.market_sentiment import MarketSentimentCollector, prompt_snippet
-
     collector = PriceCollector()
     df = collector.fetch(ticker, period="6mo")
     if df.empty:
@@ -178,11 +87,9 @@ def collect_and_build(ticker: str, market: str) -> dict | None:
     except Exception:
         pass
 
-    # Fear & Greed (best-effort)
     fg_text = ""
     try:
-        fg = MarketSentimentCollector().fetch()
-        fg_text = prompt_snippet(fg)
+        fg_text = prompt_snippet(MarketSentimentCollector().fetch())
     except Exception:
         pass
 
@@ -280,20 +187,20 @@ if st.session_state.prompt_data is None:
     st.stop()
 
 # ── Step 1: Show prompt ───────────────────────────────────────────────────────
-pd = st.session_state.prompt_data
-ticker   = pd["ticker"]
-market   = pd["market"]
-company  = pd["company_name"]
-t_score  = pd["t_score"]
-last_row = pd["last_row"]
-prompt   = pd["prompt"]
+pdata    = st.session_state.prompt_data
+ticker   = pdata["ticker"]
+market   = pdata["market"]
+company  = pdata["company_name"]
+t_score  = pdata["t_score"]
+last_row = pdata["last_row"]
+prompt   = pdata["prompt"]
 
 # Header row
 col_title, col_time = st.columns([3, 1])
 with col_title:
     st.subheader(f"1️⃣  {company} ({ticker}) — 분석 프롬프트 준비 완료")
 with col_time:
-    st.caption(f"생성: {pd['generated_at']}  |  뉴스: {pd['news_count']}건")
+    st.caption(f"생성: {pdata['generated_at']}  |  뉴스: {pdata['news_count']}건")
 
 # Tech signal mini-summary
 try:
@@ -314,7 +221,7 @@ m4.metric("MACD", "골든크로스" if macd_v > macd_s else "데드크로스")
 st.divider()
 
 # ── News headlines (참고용, 분석 흐름과 독립) ────────────────────────────────
-articles = pd.get("articles", [])
+articles = pdata.get("articles", [])
 if articles:
     with st.expander(f"📰 최근 뉴스 헤드라인 ({len(articles)}건, 최근 24시간)", expanded=False):
         for i, a in enumerate(articles[:10], 1):
@@ -424,14 +331,14 @@ if paste_text.strip():
                 action=action,
                 reason=reason_input,
                 price=price_input if price_input > 0 else None,
-                sector=pd.get("sector", ""),
+                sector=pdata.get("sector", ""),
                 rsi=rsi_db,
-                macd_cross=pd["macd_cross"],
+                macd_cross=pdata["macd_cross"],
                 context={
                     "t_score": t_score,
                     "confidence": parsed.confidence,
                     "price_target": parsed.price_target,
-                    "news_count": pd["news_count"],
+                    "news_count": pdata["news_count"],
                     "news_sentiment": parsed.sentiment or "neutral",
                 },
             )

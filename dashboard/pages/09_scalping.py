@@ -6,8 +6,6 @@
 """
 from __future__ import annotations
 
-import base64
-import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -20,12 +18,13 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-import streamlit.components.v1 as components
 from plotly.subplots import make_subplots
 
-from config.sources import KOSPI_TICKER_MAP, NASDAQ_TICKER_MAP, TICKER_KR_NAME
+from config.sources import TICKER_KR_NAME
 from data.collectors.market_sentiment import MarketSentimentCollector, prompt_snippet
 from data.collectors.price_collector import PriceCollector
+from utils.ticker_utils import resolve_ticker as _resolve_base, detect_market, is_kr, fmt_price
+from utils.clipboard import copy_button
 
 # ── Scalping parameters ────────────────────────────────────────────────────────
 ST_MA_WINDOWS  = [5, 10, 20]          # 단기 이동평균
@@ -49,37 +48,8 @@ WAIT = "#9E9E9E"
 MA_COLORS = {5: "#FF9800", 10: "#2196F3", 20: "#9C27B0"}
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-_NAME_TO_TICKER: dict[str, str] = {}
-_NAME_TO_TICKER.update(KOSPI_TICKER_MAP)
-_NAME_TO_TICKER.update(NASDAQ_TICKER_MAP)
-
-
 def _resolve(raw: str) -> str:
-    raw = raw.strip()
-    if re.match(r"^\d{6}\.(KS|KQ)$", raw, re.IGNORECASE):
-        return raw.upper()
-    if re.match(r"^[A-Z]{1,5}$", raw, re.IGNORECASE):
-        return raw.upper()
-    for name in sorted(_NAME_TO_TICKER, key=len, reverse=True):
-        if name in raw:
-            return _NAME_TO_TICKER[name]
-    return raw.upper()
-
-
-def _detect_market(ticker: str) -> str:
-    t = ticker.upper()
-    if t.endswith(".KS"): return "KOSPI"
-    if t.endswith(".KQ"): return "KOSDAQ"
-    return "NASDAQ"
-
-
-def _is_kr(ticker: str) -> bool:
-    return ticker.upper().endswith((".KS", ".KQ"))
-
-
-def fmt_price(val: float, ticker: str) -> str:
-    return f"₩{val:,.0f}" if _is_kr(ticker) else f"${val:,.2f}"
+    return _resolve_base(raw)
 
 
 # ── Scalping indicator computation ────────────────────────────────────────────
@@ -241,35 +211,7 @@ def detect_signals(df: pd.DataFrame) -> dict:
     }
 
 
-# ── Copy button ───────────────────────────────────────────────────────────────
-
-def _copy_button(text: str, label: str = "📋 프롬프트 복사") -> None:
-    b64 = base64.b64encode(text.encode("utf-8")).decode("ascii")
-    html = f"""
-<meta charset="utf-8">
-<style>
-  body{{margin:0;padding:0}}
-  .btn{{background:linear-gradient(135deg,#E65100,#BF360C);color:#fff;border:none;
-        padding:13px 0;border-radius:10px;font-size:16px;font-weight:700;
-        cursor:pointer;width:100%;transition:opacity .15s}}
-  .btn:hover{{opacity:.88}}.btn:active{{opacity:.72;transform:scale(.99)}}
-</style>
-<button class="btn" onclick="(function(btn){{
-  var bytes=Uint8Array.from(atob('{b64}'),function(c){{return c.charCodeAt(0)}});
-  var text=new TextDecoder('utf-8').decode(bytes);
-  function done(){{btn.textContent='✅ 복사 완료 — Claude.ai에 붙여넣으세요';
-    setTimeout(function(){{btn.textContent='{label}'}},4000)}}
-  var nav=(window.parent&&window.parent!==window&&window.parent.navigator)
-    ?window.parent.navigator:navigator;
-  if(nav.clipboard&&nav.clipboard.writeText){{
-    nav.clipboard.writeText(text).then(done).catch(function(){{
-      var doc=(window.parent&&window.parent.document)?window.parent.document:document;
-      var ta=doc.createElement('textarea');ta.value=text;
-      ta.style.cssText='position:fixed;opacity:0';doc.body.appendChild(ta);
-      ta.focus();ta.select();doc.execCommand('copy');doc.body.removeChild(ta);done();
-    }})}}else{{done()}}
-}})(this)">{label}</button>"""
-    components.html(html, height=55)
+_SCALPING_GRADIENT = "linear-gradient(135deg,#E65100,#BF360C)"
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -305,8 +247,8 @@ with st.sidebar:
 
 # ── Resolve ticker ─────────────────────────────────────────────────────────────
 ticker = _resolve(raw_input)
-market = _detect_market(ticker)
-kr     = _is_kr(ticker)
+market = detect_market(ticker)
+kr     = is_kr(ticker)
 
 
 # ── Data loading (cached) ─────────────────────────────────────────────────────
@@ -637,10 +579,10 @@ with col_table:
             })
 
         st.caption("**대칭 계산**")
-        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
         st.caption("**비대칭 R:R 시나리오 (권장)**")
-        st.dataframe(pd.DataFrame(rr_rows), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(rr_rows), hide_index=True, width="stretch")
 
         # Quick guidance
         stop2 = entry_price * 0.98
@@ -779,5 +721,5 @@ with st.expander("📄 프롬프트 내용 미리보기", expanded=False):
     st.code(prompt, language="markdown")
 
 st.markdown("**단타 분석 프롬프트가 준비됐습니다. 복사 후 Claude.ai에 붙여넣으세요:**")
-_copy_button(prompt, "📋 단타 분석 프롬프트 복사")
+copy_button(prompt, "📋 단타 분석 프롬프트 복사", gradient=_SCALPING_GRADIENT)
 st.caption("버튼 클릭 후 Claude.ai에 붙여넣으세요 (Ctrl+V)")

@@ -162,7 +162,7 @@ def _render_scan_results(
     top5  = df_show.head(5)
     event = st.dataframe(
         top5.style.apply(_style_scan, axis=None),
-        use_container_width=True, hide_index=True,
+        width="stretch", hide_index=True,
         selection_mode="single-row", on_select="rerun",
         key=df_key,
     )
@@ -170,7 +170,7 @@ def _render_scan_results(
         with st.expander(f"전체 {len(df_show)}쌍 보기"):
             st.dataframe(
                 df_show.style.apply(_style_scan, axis=None),
-                use_container_width=True, hide_index=True,
+                width="stretch", hide_index=True,
             )
 
     selected_rows = event.selection.rows if event.selection else []
@@ -560,7 +560,7 @@ with tab_direct:
             col_sig_b:     result.signal_b,
             "신뢰도 지표": "가중 평균",
         })
-        st.dataframe(pd.DataFrame(contrib_rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(contrib_rows), width="stretch", hide_index=True)
 
         w_ols    = result.contributions[0].weight
         w_kalman = result.contributions[1].weight
@@ -735,7 +735,7 @@ with tab_direct:
                 tbl.style
                 .format({"OLS 스프레드": "{:.4f}", "OLS Z": "{:.4f}", "Kalman Z": "{:.4f}"})
                 .map(_color_z, subset=["OLS Z", "Kalman Z"]),
-                use_container_width=True,
+                width="stretch",
             )
 
     # ── SINGLE STOCK MODE ─────────────────────────────────────────────────────
@@ -896,5 +896,5 @@ with tab_direct:
                 tbl.style
                 .format({"가격": "{:,.2f}", "Z-score": "{:.4f}"})
                 .map(_color_z2, subset=["Z-score"]),
-                use_container_width=True,
+                width="stretch",
             )

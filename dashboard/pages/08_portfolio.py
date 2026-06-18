@@ -4,7 +4,6 @@ SQLite 저장 · 직접 입력 · CSV 업로드 · P&L 대시보드 · AI 분석
 """
 from __future__ import annotations
 
-import base64
 import re
 import sys
 from datetime import date, datetime, timedelta
@@ -18,13 +17,14 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-import streamlit.components.v1 as components
 import yfinance as yf
 
-from config.sources import KOSPI_TICKER_MAP, NASDAQ_TICKER_MAP, TICKER_KR_NAME
+from config.sources import TICKER_KR_NAME
 from data.collectors.market_sentiment import MarketSentimentCollector, prompt_snippet
 from data.collectors.price_collector import PriceCollector
 from portfolio.manager import GROUP_ACCUMULATING, GROUP_HOLDING, PortfolioManager
+from utils.ticker_utils import resolve_ticker as _resolve_base, is_kr, fmt_price
+from utils.clipboard import copy_button
 
 # ── Init ──────────────────────────────────────────────────────────────────────
 pm = PortfolioManager()
@@ -36,40 +36,13 @@ UP   = "#26a69a"
 DOWN = "#ef5350"
 
 
-# ── Ticker resolution (Korean name → ticker) ──────────────────────────────────
-_NAME_TO_TICKER: dict[str, str] = {}
-_NAME_TO_TICKER.update(KOSPI_TICKER_MAP)
-_NAME_TO_TICKER.update(NASDAQ_TICKER_MAP)
-
-
-def _resolve(raw: str) -> tuple[str, str]:
-    """Returns (ticker, market). Market auto-detected from ticker suffix."""
-    raw = raw.strip()
-    if re.match(r"^\d{6}\.(KS|KQ)$", raw, re.IGNORECASE):
-        mkt = "KOSDAQ" if raw.upper().endswith(".KQ") else "KOSPI"
-        return raw.upper(), mkt
-    if re.match(r"^[A-Z]{1,5}$", raw, re.IGNORECASE):
-        return raw.upper(), "NASDAQ"
-    # Korean name — longest match first
-    for name in sorted(_NAME_TO_TICKER, key=len, reverse=True):
-        if name in raw:
-            t = _NAME_TO_TICKER[name]
-            return t, "KOSDAQ" if t.endswith(".KQ") else "KOSPI"
-    has_kr = any("가" <= c <= "힣" for c in raw)
-    return raw.upper(), "KOSPI" if has_kr else "NASDAQ"
-
-
-def _is_kr(ticker: str) -> bool:
-    t = ticker.upper()
-    return t.endswith(".KS") or t.endswith(".KQ")
+def _resolve(raw: str) -> str:
+    """한글 회사명 또는 티커 입력을 yfinance 티커 문자열로 변환한다."""
+    return _resolve_base(raw)
 
 
 def _display_name(h: dict) -> str:
     return h["name"] or TICKER_KR_NAME.get(h["ticker"]) or h["ticker"]
-
-
-def fmt_price(val: float, ticker: str) -> str:
-    return f"₩{val:,.0f}" if _is_kr(ticker) else f"${val:,.2f}"
 
 
 def pnl_color(val: float) -> str:
@@ -160,35 +133,7 @@ def build_pnl_df(holdings: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-# ── Copy-to-clipboard button (reused from 06_chat.py pattern) ─────────────────
-
-def _copy_button(text: str, label: str = "📋 프롬프트 복사") -> None:
-    b64 = base64.b64encode(text.encode("utf-8")).decode("ascii")
-    html = f"""
-<meta charset="utf-8">
-<style>
-  body {{margin:0;padding:0}}
-  .btn {{background:linear-gradient(135deg,#1565C0,#0D47A1);color:#fff;border:none;
-         padding:13px 0;border-radius:10px;font-size:16px;font-weight:700;
-         cursor:pointer;width:100%;transition:opacity .15s}}
-  .btn:hover{{opacity:.88}} .btn:active{{opacity:.72;transform:scale(.99)}}
-</style>
-<button class="btn" onclick="(function(btn){{
-  var bytes=Uint8Array.from(atob('{b64}'),function(c){{return c.charCodeAt(0)}});
-  var text=new TextDecoder('utf-8').decode(bytes);
-  function done(){{btn.textContent='✅ 복사 완료 — Claude.ai에 붙여넣으세요';
-    setTimeout(function(){{btn.textContent='{label}'}},4000)}}
-  var nav=(window.parent&&window.parent!==window&&window.parent.navigator)
-    ?window.parent.navigator:navigator;
-  if(nav.clipboard&&nav.clipboard.writeText){{
-    nav.clipboard.writeText(text).then(done).catch(function(){{
-      var doc=(window.parent&&window.parent.document)?window.parent.document:document;
-      var ta=doc.createElement('textarea');ta.value=text;
-      ta.style.cssText='position:fixed;opacity:0';doc.body.appendChild(ta);
-      ta.focus();ta.select();doc.execCommand('copy');doc.body.removeChild(ta);done();
-    }})}}else{{done()}}
-}})(this)">{label}</button>"""
-    components.html(html, height=55)
+_PORTFOLIO_GRADIENT = "linear-gradient(135deg,#1565C0,#0D47A1)"
 
 
 # ── Sidebar: Add holding + CSV upload ─────────────────────────────────────────
@@ -230,7 +175,7 @@ with st.sidebar:
                 elif cost_input <= 0:
                     st.error("평균매입가를 입력하세요.")
                 else:
-                    ticker, _ = _resolve(raw_input)
+                    ticker = _resolve(raw_input)
                     name = TICKER_KR_NAME.get(ticker) or raw_input.strip()
                     pm.add_holding(
                         ticker=ticker,
@@ -358,7 +303,7 @@ with tab_dash:
             "평가손익":  "{:+,.0f}",
             "수익률(%)": "{:+.2f}",
         }),
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
@@ -720,5 +665,5 @@ with tab_ai:
         st.code(prompt, language="markdown")
 
     st.markdown("**프롬프트가 준비됐습니다. 복사 후 Claude.ai에 붙여넣으세요:**")
-    _copy_button(prompt, "📋 포트폴리오 분석 프롬프트 복사")
+    copy_button(prompt, "📋 포트폴리오 분석 프롬프트 복사", gradient=_PORTFOLIO_GRADIENT)
     st.caption("버튼 클릭 후 Claude.ai에서 직접 붙여넣어주세요 (Ctrl+V)")

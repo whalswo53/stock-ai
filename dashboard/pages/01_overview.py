@@ -14,6 +14,7 @@ from data.collectors.price_collector import PriceCollector
 from data.collectors.market_sentiment import MarketSentimentCollector, score_to_color
 from analysis.technical.indicators import TechnicalIndicators
 from config.sources import TICKER_KR_NAME
+from utils.ticker_utils import detect_market, is_kr
 
 # ── Color palette ─────────────────────────────────────────────────────────────
 UP_COLOR = "#26a69a"
@@ -21,21 +22,6 @@ DOWN_COLOR = "#ef5350"
 MA_COLORS = {5: "#FF9800", 20: "#2196F3", 60: "#9C27B0", 120: "#F44336"}
 
 PERIOD_OPTIONS = {"3개월": "3mo", "6개월": "6mo", "1년": "1y", "2년": "2y"}
-
-
-# ── Market auto-detection ──────────────────────────────────────────────────────
-def _detect_market(ticker: str) -> str:
-    t = ticker.upper()
-    if t.endswith(".KS"):
-        return "KOSPI"
-    if t.endswith(".KQ"):
-        return "KOSDAQ"
-    return "NASDAQ"
-
-
-def _is_kr(ticker: str) -> bool:
-    t = ticker.upper()
-    return t.endswith(".KS") or t.endswith(".KQ")
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -74,8 +60,8 @@ with st.sidebar:
 
 
 # ── Market auto-detected from ticker ─────────────────────────────────────────
-market = _detect_market(ticker)
-kr = _is_kr(ticker)
+market = detect_market(ticker)
+kr = is_kr(ticker)
 
 
 # ── Data loading (cached) ─────────────────────────────────────────────────────
