@@ -42,9 +42,11 @@ def _is_kr(ticker: str) -> bool:
 with st.sidebar:
     st.title("⚙️ 설정")
 
+    # Accept ticker pre-fill from portfolio page jump
+    _jump = st.session_state.pop("portfolio_jump_ticker", None)
     ticker = st.text_input(
         "종목 코드 또는 한글명",
-        value="005930.KS",
+        value=_jump or "005930.KS",
         placeholder="예: 005930.KS · 삼성전자 · AAPL · 엔비디아",
     ).strip()
 
