@@ -98,10 +98,11 @@ with st.sidebar:
 
 pages = {
     "분석": [
-        st.Page("pages/01_overview.py",    title="종목 분석",    icon="📈"),
-        st.Page("pages/09_scalping.py",    title="단타 분석",    icon="⚡"),
+        st.Page("pages/01_overview.py",      title="종목 분석",    icon="📈"),
+        st.Page("pages/09_scalping.py",      title="단타 분석",    icon="⚡"),
         st.Page("pages/07_pairs_trading.py", title="페어 트레이딩", icon="📊"),
-        st.Page("pages/08_portfolio.py",   title="포트폴리오",   icon="💼"),
+        st.Page("pages/08_portfolio.py",     title="포트폴리오",   icon="💼"),
+        st.Page("pages/10_backtest.py",      title="백테스팅",     icon="🔬"),
     ],
     "AI": [
         st.Page("pages/06_chat.py", title="AI 채팅", icon="💬"),
