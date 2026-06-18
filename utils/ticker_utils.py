@@ -11,7 +11,7 @@ import re
 import time
 from typing import TYPE_CHECKING
 
-from config.sources import KOSPI_TICKER_MAP, NASDAQ_TICKER_MAP
+from config.sources import KOSPI_TICKER_MAP, NASDAQ_TICKER_MAP, TICKER_KR_NAME as _TICKER_KR_NAME
 
 # ── Static base map ────────────────────────────────────────────────────────────
 _NAME_TO_TICKER: dict[str, str] = {**KOSPI_TICKER_MAP, **NASDAQ_TICKER_MAP}
@@ -449,6 +449,14 @@ def is_kr(ticker: str) -> bool:
 def fmt_price(val: float, ticker: str) -> str:
     """티커 기반으로 통화 포맷을 자동 선택한다."""
     return f"₩{val:,.0f}" if is_kr(ticker) else f"${val:,.2f}"
+
+
+def get_display_name(ticker: str) -> str:
+    """
+    티커 → 표시용 회사명 반환 (정적 맵 기반, 네트워크 없음).
+    TICKER_KR_NAME에 없으면 ticker 그대로 반환.
+    """
+    return _TICKER_KR_NAME.get(ticker, ticker)
 
 
 # ── Search ────────────────────────────────────────────────────────────────────

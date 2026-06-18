@@ -23,7 +23,7 @@ from plotly.subplots import make_subplots
 from analysis.backtest.engine import BacktestEngine, BacktestResult, benchmark_equity
 from analysis.backtest.strategies import STRATEGIES, generate_signals
 from data.collectors.price_collector import PriceCollector
-from utils.ticker_utils import resolve_ticker as _resolve, is_kr as _is_kr
+from utils.ticker_utils import resolve_ticker as _resolve, is_kr as _is_kr, get_display_name
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 PERIOD_OPTIONS = {"1년": ("2y", 1), "3년": ("4y", 3), "5년": ("6y", 5)}
@@ -180,7 +180,7 @@ with st.sidebar:
 # ── Main ──────────────────────────────────────────────────────────────────────
 ticker = _resolve(raw_input)
 is_kr  = _is_kr(ticker)
-company = TICKER_KR_NAME.get(ticker) or ticker
+company = get_display_name(ticker)
 
 st.title("📊 백테스팅")
 st.caption(
