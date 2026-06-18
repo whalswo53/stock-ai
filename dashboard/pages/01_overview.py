@@ -11,7 +11,6 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from data.collectors.price_collector import PriceCollector
-from data.collectors.market_sentiment import MarketSentimentCollector, score_to_color
 from analysis.technical.indicators import TechnicalIndicators
 from config.sources import TICKER_KR_NAME
 from utils.ticker_utils import detect_market, is_kr
@@ -80,18 +79,6 @@ def load_info(ticker: str) -> dict:
     return PriceCollector().get_info(ticker)
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_fear_greed() -> dict:
-    fg = MarketSentimentCollector().fetch()
-    return {
-        "score": fg.score,
-        "label": fg.label,
-        "vix": fg.vix,
-        "source": fg.source,
-        "last_update": fg.last_update,
-    }
-
-
 with st.spinner(f"'{ticker}' 데이터 불러오는 중…"):
     df = load_ohlcv(ticker, period)
     info = load_info(ticker)
@@ -99,81 +86,6 @@ with st.spinner(f"'{ticker}' 데이터 불러오는 중…"):
 if df.empty:
     st.error(f"'{ticker}' 데이터를 불러올 수 없습니다. 종목 코드를 확인해주세요.")
     st.stop()
-
-
-# ── Fear & Greed gauge ────────────────────────────────────────────────────────
-def _build_fg_gauge(score: int, label: str) -> go.Figure:
-    fig = go.Figure(go.Indicator(
-        mode="gauge+number",
-        value=score,
-        domain={"x": [0, 1], "y": [0, 1]},
-        title={
-            "text": f"공포·탐욕 지수 — <b>{label}</b>",
-            "font": {"size": 13, "color": "#ccc"},
-        },
-        number={"font": {"size": 40, "color": "white"}},
-        gauge={
-            "axis": {
-                "range": [0, 100],
-                "tickvals": [0, 20, 40, 60, 80, 100],
-                "tickcolor": "#666",
-                "tickwidth": 1,
-            },
-            # bar를 바늘처럼 얇게 만들어 현재 값을 가리킨다
-            "bar": {"color": "white", "thickness": 0.04},
-            "bgcolor": "rgba(0,0,0,0)",
-            "borderwidth": 0,
-            "steps": [
-                {"range": [0,  20], "color": "#c62828"},
-                {"range": [20, 40], "color": "#e64a19"},
-                {"range": [40, 60], "color": "#f9a825"},
-                {"range": [60, 80], "color": "#558b2f"},
-                {"range": [80, 100], "color": "#00695c"},
-            ],
-            "threshold": {
-                "line": {"color": "white", "width": 4},
-                "thickness": 0.85,
-                "value": score,
-            },
-        },
-    ))
-    fig.update_layout(
-        height=220,
-        margin=dict(l=30, r=30, t=45, b=10),
-        paper_bgcolor="rgba(0,0,0,0)",
-        font={"color": "white"},
-    )
-    return fig
-
-
-fg = load_fear_greed()
-fg_score = fg["score"]
-fg_label = fg["label"]
-fg_color = score_to_color(fg_score)
-
-with st.container():
-    c_gauge, c_legend = st.columns([1, 1])
-    with c_gauge:
-        st.plotly_chart(_build_fg_gauge(fg_score, fg_label), width="stretch")
-    with c_legend:
-        st.markdown("")
-        st.markdown("")
-        if fg["vix"] >= 0:
-            st.metric("VIX", f"{fg['vix']:.1f}")
-        st.caption(f"출처: {fg['source']}")
-        if fg.get("last_update"):
-            st.caption(f"기준: {fg['last_update']}")
-        st.markdown(
-            "| 점수 | 분위기 |\n"
-            "|------|--------|\n"
-            "| 0–20 | 🔴 극도의 공포 |\n"
-            "| 21–40 | 🟠 공포 |\n"
-            "| 41–60 | 🟡 중립 |\n"
-            "| 61–80 | 🟢 탐욕 |\n"
-            "| 81–100 | 🟩 극도의 탐욕 |"
-        )
-
-st.divider()
 
 
 # ── Header: company name + key metrics ───────────────────────────────────────
@@ -203,8 +115,8 @@ def fmt_volume(vol: float) -> str:
     return f"{vol:,.0f}"
 
 
-st.title(f"📈  {company_name}")
-st.caption(f"{ticker}  ·  {market}  ·  {currency}  ·  {period_label} 기간")
+st.title(f"📈  {company_name} — 장기/스윙 분석")
+st.caption(f"{ticker}  ·  {market}  ·  {currency}  ·  {period_label} 기간  ·  중장기 매매 관점")
 
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("현재가", fmt_price(last_close), f"{change_pct:+.2f}%")

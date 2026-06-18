@@ -303,6 +303,12 @@ st.caption(
     f"{ticker}  ·  {market}  ·  {period_label} 조회  ·  "
     f"RSI-{ST_RSI_PERIOD} / MACD {ST_MACD_FAST}/{ST_MACD_SLOW}/{ST_MACD_SIG} / BB-{ST_BB_PERIOD}"
 )
+st.warning(
+    "⚠️ **이 페이지는 1주일 이내 단기 매매 전용입니다.**  \n"
+    "RSI·MACD·볼린저밴드 파라미터가 단타 최적화 값으로 설정되어 있습니다.  \n"
+    "중장기 투자 판단에는 **📈 장기/스윙 분석** 또는 **🎯 종합 분석** 페이지를 이용하세요.",
+    icon=None,
+)
 
 # ── Top metrics ───────────────────────────────────────────────────────────────
 change_abs = close - float(prev["Close"])
