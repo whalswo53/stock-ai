@@ -81,7 +81,13 @@ def load_info(ticker: str) -> dict:
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_fear_greed() -> dict:
     fg = MarketSentimentCollector().fetch()
-    return {"score": fg.score, "label": fg.label, "vix": fg.vix, "source": fg.source}
+    return {
+        "score": fg.score,
+        "label": fg.label,
+        "vix": fg.vix,
+        "source": fg.source,
+        "last_update": fg.last_update,
+    }
 
 
 with st.spinner(f"'{ticker}' 데이터 불러오는 중…"):
@@ -111,7 +117,8 @@ def _build_fg_gauge(score: int, label: str) -> go.Figure:
                 "tickcolor": "#666",
                 "tickwidth": 1,
             },
-            "bar": {"color": "white", "thickness": 0.025},
+            # bar를 바늘처럼 얇게 만들어 현재 값을 가리킨다
+            "bar": {"color": "white", "thickness": 0.04},
             "bgcolor": "rgba(0,0,0,0)",
             "borderwidth": 0,
             "steps": [
@@ -121,11 +128,16 @@ def _build_fg_gauge(score: int, label: str) -> go.Figure:
                 {"range": [60, 80], "color": "#558b2f"},
                 {"range": [80, 100], "color": "#00695c"},
             ],
+            "threshold": {
+                "line": {"color": "white", "width": 4},
+                "thickness": 0.85,
+                "value": score,
+            },
         },
     ))
     fig.update_layout(
-        height=200,
-        margin=dict(l=30, r=30, t=40, b=10),
+        height=220,
+        margin=dict(l=30, r=30, t=45, b=10),
         paper_bgcolor="rgba(0,0,0,0)",
         font={"color": "white"},
     )
@@ -146,7 +158,9 @@ with st.container():
         st.markdown("")
         if fg["vix"] >= 0:
             st.metric("VIX", f"{fg['vix']:.1f}")
-        st.caption(fg["source"])
+        st.caption(f"출처: {fg['source']}")
+        if fg.get("last_update"):
+            st.caption(f"기준: {fg['last_update']}")
         st.markdown(
             "| 점수 | 분위기 |\n"
             "|------|--------|\n"

@@ -54,7 +54,12 @@ def _show_login() -> None:
 @st.cache_data(ttl=3600, show_spinner=False)
 def _load_fear_greed() -> dict:
     fg = MarketSentimentCollector().fetch()
-    return {"score": fg.score, "label": fg.label, "vix": fg.vix}
+    return {
+        "score": fg.score,
+        "label": fg.label,
+        "vix": fg.vix,
+        "last_update": fg.last_update,
+    }
 
 
 if not st.session_state.get("authenticated", False):
@@ -69,6 +74,7 @@ with st.sidebar:
         _label = _fg["label"]
         _color = score_to_color(_score)
         _vix_txt = f"VIX {_fg['vix']:.1f}  ·  " if _fg["vix"] >= 0 else ""
+        _upd_txt = _fg.get("last_update", "")
         st.markdown(
             f"""<div style="padding:10px 4px 4px 4px">
             <div style="font-size:11px;color:#888;margin-bottom:6px">📊 공포·탐욕 지수</div>
@@ -84,7 +90,8 @@ with st.sidebar:
             <div style="display:flex;justify-content:space-between;font-size:10px;color:#555">
               <span>극도공포</span><span>중립</span><span>극도탐욕</span>
             </div>
-            <div style="font-size:10px;color:#555;margin-top:4px">{_vix_txt}1시간 캐시</div>
+            <div style="font-size:10px;color:#555;margin-top:4px">{_vix_txt}CNN F&amp;G</div>
+            {f'<div style="font-size:9px;color:#444;margin-top:2px">기준: {_upd_txt}</div>' if _upd_txt else ''}
             </div>""",
             unsafe_allow_html=True,
         )
