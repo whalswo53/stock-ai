@@ -12,6 +12,7 @@ from __future__ import annotations
 import csv
 import io
 import sqlite3
+import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +21,26 @@ from typing import Any, Generator, Optional
 from config.settings import STORAGE_DIR
 
 DB_PATH = STORAGE_DIR / "portfolio.db"
+
+_usd_krw_cache: dict = {"rate": None, "ts": 0.0}
+
+
+def get_usd_krw_rate() -> float:
+    """USD/KRW 환율 조회 (1시간 캐시, 실패 시 1300 반환)."""
+    if _usd_krw_cache["rate"] is not None and time.time() - _usd_krw_cache["ts"] < 3600:
+        return _usd_krw_cache["rate"]
+    try:
+        import yfinance as yf
+        ticker = yf.Ticker("KRW=X")
+        hist = ticker.history(period="1d")
+        if hist.empty:
+            raise ValueError("빈 데이터")
+        rate = float(hist["Close"].iloc[-1])
+        _usd_krw_cache["rate"] = rate
+        _usd_krw_cache["ts"] = time.time()
+        return rate
+    except Exception:
+        return 1300.0
 
 GROUP_ACCUMULATING = "accumulating"   # 모으는 중
 GROUP_HOLDING      = "holding"        # 보유 중
