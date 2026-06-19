@@ -252,12 +252,16 @@ def _fetch_peer_prices(tickers_tuple: tuple, period: str) -> dict[str, list]:
 @st.cache_data(ttl=1800, show_spinner=False)
 def _run_dynamic_scan(
     tickers_tuple: tuple, names_json: str, period: str, window: int, ez: float, xz: float,
+    seed_ticker: str = "",
 ) -> list[PairScanResult]:
     names   = json.loads(names_json)
     raw     = _fetch_peer_prices(tickers_tuple, period)
     prices  = _restore_prices(raw)
     scanner = PairScanner(period=period, zscore_window=window, entry_z=ez, exit_z=xz)
-    return scanner.scan_tickers(list(tickers_tuple), names, prices)
+    return scanner.scan_tickers(
+        list(tickers_tuple), names, prices,
+        seed_ticker=seed_ticker or None,
+    )
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -347,7 +351,7 @@ with tab_scan:
             else:
                 names        = json.loads(names_json)
                 n_discovered = len(tickers_list)
-                n_pairs_dyn  = n_discovered * (n_discovered - 1) // 2
+                n_pairs_dyn  = n_discovered - 1  # seed vs 나머지 1:1
                 peers_display = "  ·  ".join(f"`{names.get(t, t)}`" for t in tickers_list)
 
                 with st.expander(
@@ -364,6 +368,7 @@ with tab_scan:
                         scan_results = _run_dynamic_scan(
                             tuple(tickers_list), names_json,
                             period, zscore_window, entry_z, exit_z,
+                            seed_ticker,
                         )
                         scan_error = None
                     except Exception as e:

@@ -182,10 +182,19 @@ class PairScanner:
         names: dict[str, str],
         prices: dict[str, pd.Series],
         progress_cb: Optional[Callable[[float, str], None]] = None,
+        seed_ticker: Optional[str] = None,
     ) -> list[PairScanResult]:
-        """Scans all combinations of given tickers (no INDUSTRY_GROUPS dependency)."""
+        """Scans ticker pairs. When seed_ticker is given, generates only
+        (seed, other) pairs with seed always as ticker_a.
+        """
         available = [t for t in tickers if t in prices]
-        return self._scan_pairs(available, names, prices, progress_cb)
+        if seed_ticker and seed_ticker in available:
+            pairs: list[tuple[str, str]] = [
+                (seed_ticker, t) for t in available if t != seed_ticker
+            ]
+        else:
+            pairs = list(itertools.combinations(available, 2))
+        return self._scan_pairs(available, names, prices, progress_cb, pairs=pairs)
 
     def to_dataframe(self, results: list[PairScanResult]) -> pd.DataFrame:
         rows = []
@@ -212,8 +221,10 @@ class PairScanner:
         names: dict[str, str],
         prices: dict[str, pd.Series],
         progress_cb: Optional[Callable[[float, str], None]],
+        pairs: Optional[list[tuple[str, str]]] = None,
     ) -> list[PairScanResult]:
-        pairs = list(itertools.combinations(available, 2))
+        if pairs is None:
+            pairs = list(itertools.combinations(available, 2))
         results: list[PairScanResult] = []
         for i, (ta, tb) in enumerate(pairs):
             if progress_cb:
