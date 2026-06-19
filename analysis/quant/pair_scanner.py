@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import itertools
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import cache
 from typing import Callable, Optional
@@ -332,38 +331,174 @@ def _load_sp500_listing() -> pd.DataFrame:
     return fdr.StockListing('S&P500')
 
 
-# ── Parallel yfinance info helper ─────────────────────────────────────────────
+# ── Korean peer discovery helpers ────────────────────────────────────────────
 
-def _fetch_yf_info(ticker: str) -> tuple[str, str, str, str]:
-    """Returns (ticker, sector, industry, shortName) via yfinance.
-    Returns empty strings on rate-limit or any other error so callers can skip gracefully.
+_NAVER_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+    'Referer': 'https://finance.naver.com',
+}
+
+
+def _kr_peers_via_naver(ticker: str, top_n: int) -> "PeerGroup":
+    """Primary KR peer source: Naver Finance upjong (KRX 업종) classification.
+
+    Flow:
+      1. coinfo.naver → extract upjong number
+      2. sise_group_detail.naver → sector name + all peer codes
+      3. FDR KRX listing → market-cap rank, Korean names, KOSPI/KOSDAQ suffix
     """
-    import yfinance as yf
-    time.sleep(0.5)  # throttle each thread to stay under rate limits
-    try:
-        info = yf.Ticker(ticker).info
-        return (
-            ticker,
-            info.get('sector',    ''),
-            info.get('industry',  ''),
-            info.get('shortName', ticker),
-        )
-    except _YFRateLimitError:
-        return ticker, '', '', ticker
-    except Exception:
-        return ticker, '', '', ticker
+    import requests
+    from bs4 import BeautifulSoup
+
+    code = ticker[:-3]  # strip .KS / .KQ
+
+    # ── Step 1: upjong number ────────────────────────────────────────────────
+    r = requests.get(
+        'https://finance.naver.com/item/coinfo.naver',
+        params={'code': code},
+        headers=_NAVER_HEADERS,
+        timeout=10,
+    )
+    r.raise_for_status()
+    soup = BeautifulSoup(r.text, 'html.parser')
+
+    upjong_no: str | None = None
+    for a in soup.find_all('a', href=True):
+        href = a['href']
+        if 'sise_group_detail' in href and 'upjong' in href and 'no=' in href:
+            upjong_no = href.split('no=')[-1].split('&')[0]
+            break
+
+    if not upjong_no:
+        raise ValueError(f"네이버 금융에서 '{ticker}' 업종 코드를 찾을 수 없습니다.")
+
+    # ── Step 2: sector name + peer codes ────────────────────────────────────
+    r2 = requests.get(
+        'https://finance.naver.com/sise/sise_group_detail.naver',
+        params={'type': 'upjong', 'no': upjong_no},
+        headers=_NAVER_HEADERS,
+        timeout=10,
+    )
+    r2.raise_for_status()
+    soup2 = BeautifulSoup(r2.text, 'html.parser')
+
+    sector_name = ''
+    title_tag = soup2.find('title')
+    if title_tag:
+        sector_name = title_tag.get_text().split(':')[0].strip()
+
+    peer_codes: set[str] = set()
+    for a in soup2.find_all('a', href=lambda h: h and 'code=' in h and 'item/main' in h):
+        c = a['href'].split('code=')[-1].split('&')[0]
+        if c and len(c) == 6 and c.isdigit():
+            peer_codes.add(c)
+
+    if not peer_codes:
+        raise ValueError(f"'{ticker}' 업종 종목 리스트를 가져올 수 없습니다.")
+
+    # ── Step 3: rank by market cap, resolve suffix ───────────────────────────
+    krx = _load_krx_listing()
+    code_to_marcap = dict(zip(krx['Code'], krx['Marcap']))
+    code_to_name   = dict(zip(krx['Code'], krx['Name']))
+    code_to_market = dict(zip(krx['Code'], krx['Market']))
+
+    ranked = sorted(peer_codes, key=lambda c: code_to_marcap.get(c, 0), reverse=True)
+    if code in ranked:
+        ranked = [code] + [c for c in ranked if c != code]
+    ranked = ranked[:top_n]
+
+    peers: list[str] = []
+    names: dict[str, str] = {}
+    for c in ranked:
+        mkt = str(code_to_market.get(c, ''))
+        suffix = '.KQ' if 'KOSDAQ' in mkt else '.KS'
+        tkr = f'{c}{suffix}'
+        peers.append(tkr)
+        names[tkr] = code_to_name.get(c) or tkr
+
+    if ticker not in peers:
+        peers = [ticker] + peers[:top_n - 1]
+        names.setdefault(ticker, code_to_name.get(code, ticker))
+
+    return PeerGroup(
+        seed_ticker=ticker,
+        sector=sector_name,
+        industry=sector_name,
+        source=f'네이버 금융 업종 분류 (KRX 기준) + FDR 시가총액 순위',
+        tickers=peers,
+        names=names,
+    )
 
 
-def _parallel_yf_info(
-    tickers: list[str],
-    max_workers: int = 3,  # reduced from 10 — avoids rate-limit bursts
-) -> dict[str, dict[str, str]]:
-    """Fetches sector / industry / shortName for many tickers concurrently."""
-    result: dict[str, dict[str, str]] = {}
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for ticker, sector, industry, name in ex.map(_fetch_yf_info, tickers):
-            result[ticker] = {"sector": sector, "industry": industry, "name": name}
-    return result
+def _kr_peers_via_pykrx(ticker: str, top_n: int) -> "PeerGroup":
+    """Fallback KR peer source: pykrx get_market_sector_classifications."""
+    from pykrx import stock
+    from datetime import date, timedelta
+
+    suffix = '.KS' if ticker.endswith('.KS') else '.KQ'
+    code   = ticker[:-3]
+    market = 'KOSPI' if suffix == '.KS' else 'KOSDAQ'
+
+    # Try up to 5 recent business days to find a date with data
+    df = None
+    today = date.today()
+    for delta in range(10):
+        d = today - timedelta(days=delta)
+        if d.weekday() >= 5:
+            continue
+        try:
+            candidate = stock.get_market_sector_classifications(d.strftime('%Y%m%d'), market)
+            if candidate is not None and not candidate.empty:
+                df = candidate
+                break
+        except Exception:
+            continue
+
+    if df is None or df.empty:
+        raise ValueError("pykrx에서 업종 분류 데이터를 가져올 수 없습니다.")
+
+    # Identify sector column (pykrx returns '업종명' or similar)
+    sector_col = next((c for c in df.columns if '업종' in c), None)
+    if sector_col is None:
+        raise ValueError("pykrx 데이터에서 업종 컬럼을 찾을 수 없습니다.")
+
+    # Find seed's sector
+    df.index = df.index.astype(str).str.zfill(6)
+    if code not in df.index:
+        raise ValueError(f"pykrx 데이터에서 '{ticker}' 종목을 찾을 수 없습니다.")
+
+    seed_sector = str(df.loc[code, sector_col])
+    peer_codes  = df[df[sector_col] == seed_sector].index.tolist()
+
+    # Rank by market cap
+    krx = _load_krx_listing()
+    code_to_marcap = dict(zip(krx['Code'], krx['Marcap']))
+    code_to_name   = dict(zip(krx['Code'], krx['Name']))
+
+    ranked = sorted(peer_codes, key=lambda c: code_to_marcap.get(c, 0), reverse=True)
+    if code in ranked:
+        ranked = [code] + [c for c in ranked if c != code]
+    ranked = ranked[:top_n]
+
+    peers: list[str] = []
+    names: dict[str, str] = {}
+    for c in ranked:
+        tkr = f'{c}{suffix}'
+        peers.append(tkr)
+        names[tkr] = code_to_name.get(c) or tkr
+
+    if ticker not in peers:
+        peers = [ticker] + peers[:top_n - 1]
+        names.setdefault(ticker, code_to_name.get(code, ticker))
+
+    return PeerGroup(
+        seed_ticker=ticker,
+        sector=seed_sector,
+        industry=seed_sector,
+        source='pykrx KRX 업종 분류 + FDR 시가총액 순위',
+        tickers=peers,
+        names=names,
+    )
 
 
 # ── Main class ────────────────────────────────────────────────────────────────
@@ -374,10 +509,9 @@ class PeerDiscovery:
 
     Korean (.KS/.KQ)
     ─────────────────
-    FinanceDataReader KRX 리스팅은 업종(Sector) 컬럼을 제공하지 않습니다.
-    따라서 업종 분류는 yfinance industry 필드를 사용하고,
-    FDR KRX 시가총액(Marcap) 데이터로 상위 N개를 제한합니다.
-    → 출처: "Yahoo Finance 업종 분류 기준 (FDR KRX 시가총액 순위 활용)"
+    Primary  : 네이버 금융 업종(upjong) 분류 → KRX 공식 업종 기준
+    Fallback : pykrx get_market_sector_classifications
+    → 출처: "네이버 금융 업종 분류 (KRX 기준) + FDR 시가총액 순위"
 
     US tickers
     ──────────
@@ -387,8 +521,7 @@ class PeerDiscovery:
 
     def __init__(self, top_n: int = 10, scan_depth: int = 80) -> None:
         self.top_n = top_n
-        # scan_depth: how many top-Marcap KR stocks to check yfinance for
-        self.scan_depth = scan_depth
+        self.scan_depth = scan_depth  # kept for API compatibility; not used for KR peers
 
     @staticmethod
     def is_korean(ticker: str) -> bool:
@@ -403,70 +536,23 @@ class PeerDiscovery:
     # ── Korean peers ──────────────────────────────────────────────────────
 
     def _find_kr_peers(self, ticker: str) -> PeerGroup:
-        import yfinance as yf
+        errors: list[str] = []
 
-        suffix = '.KS' if ticker.endswith('.KS') else '.KQ'
-
-        # Seed: get sector/industry — skip gracefully on rate-limit or network error
-        seed_sector = ''
-        seed_industry = ''
+        # Primary: Naver Finance upjong (KRX official sector classification)
         try:
-            info = yf.Ticker(ticker).info
-            seed_sector   = info.get('sector',    '')
-            seed_industry = info.get('industry',  '')
-            time.sleep(0.5)
-        except (_YFRateLimitError, Exception):
-            pass
+            return _kr_peers_via_naver(ticker, self.top_n)
+        except Exception as e:
+            errors.append(f"네이버 금융: {e}")
 
-        if not seed_industry:
-            raise ValueError(
-                f"Yahoo Finance에서 '{ticker}' 업종 정보를 찾을 수 없습니다. "
-                "잠시 후 다시 시도하거나 유효한 KOSPI/KOSDAQ 티커인지 확인해주세요."
-            )
+        # Fallback: pykrx
+        try:
+            return _kr_peers_via_pykrx(ticker, self.top_n)
+        except Exception as e:
+            errors.append(f"pykrx: {e}")
 
-        # FDR KRX → top market-cap candidates
-        krx = _load_krx_listing()
-        market_prefix = 'KOSPI' if suffix == '.KS' else 'KOSDAQ'
-        universe = (
-            krx[krx['Market'].str.startswith(market_prefix, na=False)]
-            .sort_values('Marcap', ascending=False)
-            .head(self.scan_depth)
-        )
-        cand_tickers = [c + suffix for c in universe['Code']]
-
-        # Parallel-fetch industry for candidates (~2-5s for 80 stocks)
-        info_map = _parallel_yf_info(cand_tickers)
-
-        # Filter: same industry → fallback to same sector if too few
-        same_industry = [
-            t for t in cand_tickers
-            if info_map.get(t, {}).get('industry') == seed_industry
-        ]
-        if len(same_industry) < 2:
-            same_industry = [
-                t for t in cand_tickers
-                if info_map.get(t, {}).get('sector') == seed_sector
-            ]
-
-        # Ensure seed is first
-        if ticker not in same_industry:
-            same_industry = [ticker] + same_industry
-        peers = same_industry[: self.top_n]
-
-        # Names: prefer Korean name from KRX listing
-        krx_name = dict(zip(krx['Code'], krx['Name']))
-        names: dict[str, str] = {}
-        for t in peers:
-            c = t[:-3]
-            names[t] = krx_name.get(c) or info_map.get(t, {}).get('name', t) or t
-
-        return PeerGroup(
-            seed_ticker=ticker,
-            sector=seed_sector,
-            industry=seed_industry,
-            source='Yahoo Finance 업종 분류 기준 (FDR KRX 시가총액 순위 활용)',
-            tickers=peers,
-            names=names,
+        raise ValueError(
+            "업종 정보를 가져올 수 없습니다. 직접 분석 탭을 이용해주세요.\n"
+            + " / ".join(errors)
         )
 
     # ── US peers ──────────────────────────────────────────────────────────

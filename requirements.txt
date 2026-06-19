@@ -14,3 +14,4 @@ jinja2
 fear-and-greed>=0.4
 pykrx>=1.0
 supabase>=2.0.0
+beautifulsoup4>=4.12.0
