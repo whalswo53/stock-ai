@@ -1,17 +1,16 @@
 """
-News collector: yfinance ticker.news (primary) + feedparser RSS (secondary).
+News collector: Google News RSS (primary per-ticker) + feedparser market RSS (secondary).
 Filters by TRUSTED_PUBLISHERS whitelist and recency window.
 """
 
 from __future__ import annotations
 
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from urllib.parse import quote_plus
 
 import feedparser
-import yfinance as yf
 
 from config.sources import (
     BLOCKED_KEYWORDS, RSS_FEEDS, TRUSTED_PUBLISHERS,
@@ -30,6 +29,9 @@ class Article:
 
 
 class NewsCollector:
+    _GNEWS_KR = "https://news.google.com/rss/search?q={q}&hl=ko&gl=KR&ceid=KR:ko"
+    _GNEWS_EN = "https://news.google.com/rss/search?q={q}&hl=en&gl=US&ceid=US:en"
+
     def __init__(self, hours_default: int = 24) -> None:
         self._hours_default = hours_default
 
@@ -41,10 +43,8 @@ class NewsCollector:
         market: str = "NASDAQ",
         hours: int = 24,
     ) -> list[Article]:
-        """Fetches news for a single ticker. Returns deduplicated list."""
-        articles: list[Article] = []
-        articles.extend(self._from_yfinance(ticker, market, hours))
-        articles.extend(self._from_rss(market, hours, ticker_hint=ticker))
+        """Fetches news via Google News RSS for the given ticker."""
+        articles = self._from_google_news(ticker, market, hours)
         return self._deduplicate(articles)
 
     def fetch_market_news(
@@ -52,12 +52,12 @@ class NewsCollector:
         market: str = "NASDAQ",
         hours: int = 6,
     ) -> list[Article]:
-        """Fetches broad market news for the given market."""
+        """Fetches broad market news from configured RSS feeds."""
         return self._from_rss(market, hours)
 
     # ── Sources ───────────────────────────────────────────────────────────────
 
-    def _from_yfinance(
+    def _from_google_news(
         self,
         ticker: str,
         market: str,
@@ -65,44 +65,67 @@ class NewsCollector:
     ) -> list[Article]:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
         results: list[Article] = []
-        try:
-            raw_news = yf.Ticker(ticker).news or []
-        except Exception:
-            return []
 
-        trusted = TRUSTED_PUBLISHERS.get(market, [])
-        for item in raw_news:
-            title = item.get("title") or ""
-            source = item.get("publisher") or ""
-            url = item.get("link") or item.get("url") or ""
-            pub_ts = item.get("providerPublishTime")
-
-            if not title or self._has_blocked_keyword(title):
+        for feed_url in self._google_news_urls(ticker, market):
+            try:
+                parsed = feedparser.parse(feed_url)
+            except Exception:
                 continue
 
-            if trusted and not any(t in source for t in trusted):
-                continue
+            for entry in parsed.entries:
+                title = entry.get("title") or ""
+                if not title or self._has_blocked_keyword(title):
+                    continue
 
-            pub_dt: Optional[datetime] = None
-            if pub_ts:
-                try:
-                    pub_dt = datetime.fromtimestamp(int(pub_ts), tz=timezone.utc)
-                    if pub_dt < cutoff:
-                        continue
-                except (ValueError, OSError):
-                    pass
+                src = entry.get("source")
+                source = (src.get("title", "") if isinstance(src, dict) else "") or ""
 
-            results.append(
-                Article(
+                url = entry.get("link") or ""
+                summary = entry.get("summary") or ""
+
+                pub_dt: Optional[datetime] = None
+                published = entry.get("published_parsed")
+                if published:
+                    try:
+                        pub_dt = datetime(*published[:6], tzinfo=timezone.utc)
+                        if pub_dt < cutoff:
+                            continue
+                    except (TypeError, ValueError):
+                        pass
+
+                results.append(Article(
                     title=title,
                     source=source,
                     url=url,
                     published_at=pub_dt,
-                    summary=item.get("summary") or "",
+                    summary=summary[:300],
                     ticker=ticker,
-                )
-            )
+                ))
+
         return results
+
+    def _google_news_urls(self, ticker: str, market: str) -> list[str]:
+        """Builds Google News RSS URLs for the ticker.
+
+        KR stocks  → 1 feed: Korean locale, Korean company name.
+        US stocks  → 2 feeds: Korean locale (ticker only) + English locale (ticker + company name).
+        """
+        if market in ("KOSPI", "KOSDAQ"):
+            name = TICKER_KR_NAME.get(ticker) or ticker.split(".")[0]
+            return [self._GNEWS_KR.format(q=quote_plus(name))]
+
+        base = ticker.split(".")[0]
+        # Pick the first English company name longer than the ticker symbol itself
+        en_name = next(
+            (n for n, t in NASDAQ_TICKER_MAP.items()
+             if t == base and all(ord(c) < 128 for c in n) and len(n) > len(base)),
+            "",
+        )
+        en_query = f"{base} {en_name}".strip() if en_name else base
+        return [
+            self._GNEWS_KR.format(q=quote_plus(base)),
+            self._GNEWS_EN.format(q=quote_plus(en_query)),
+        ]
 
     def _from_rss(
         self,
@@ -110,6 +133,7 @@ class NewsCollector:
         hours: int,
         ticker_hint: str = "",
     ) -> list[Article]:
+        """Fetches from static market RSS feeds (used by fetch_market_news)."""
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
         feeds = RSS_FEEDS.get(market, [])
         trusted = TRUSTED_PUBLISHERS.get(market, [])
@@ -127,16 +151,8 @@ class NewsCollector:
                 if not title or self._has_blocked_keyword(title):
                     continue
 
-                # For ticker-specific queries, filter by company name presence
-                if ticker_hint:
-                    company_hint = ticker_hint.replace(".KS", "").replace(".KQ", "")
-                    if company_hint not in title and company_hint not in (entry.get("summary") or ""):
-                        # Don't discard — market RSS may still be relevant; just lower priority
-                        pass
-
                 source = entry.get("source", {}).get("title") or feed_title
                 if trusted and not any(t in source for t in trusted):
-                    # Use feed domain as fallback source label
                     source = feed_url.split("/")[2] if "/" in feed_url else source
 
                 url = entry.get("link") or ""
@@ -152,16 +168,14 @@ class NewsCollector:
                     except (TypeError, ValueError):
                         pass
 
-                results.append(
-                    Article(
-                        title=title,
-                        source=source,
-                        url=url,
-                        published_at=pub_dt,
-                        summary=summary[:300],
-                        ticker=ticker_hint,
-                    )
-                )
+                results.append(Article(
+                    title=title,
+                    source=source,
+                    url=url,
+                    published_at=pub_dt,
+                    summary=summary[:300],
+                    ticker=ticker_hint,
+                ))
 
         return results
 
