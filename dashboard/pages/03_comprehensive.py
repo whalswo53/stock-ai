@@ -19,7 +19,7 @@ import plotly.graph_objects as go
 
 from analysis.technical.indicators import TechnicalIndicators
 from analysis.technical.signals import score as tech_score
-from config.sources import TICKER_KR_NAME
+from config.sources import TICKER_KR_NAME, TRUSTED_PUBLISHERS
 from data.collectors.market_sentiment import (
     MarketSentimentCollector,
     FearGreedResult,
@@ -67,13 +67,16 @@ def _load_price(ticker: str) -> tuple[pd.DataFrame, dict]:
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def _load_news(ticker: str, market: str) -> list[dict]:
+def _load_news(ticker: str, market: str) -> tuple[list[dict], int]:
+    """Returns (관련 뉴스 목록, 수집 총 건수)."""
     try:
-        nc  = NewsCollector()
-        raw = nc.fetch_by_ticker(ticker, market, hours=48)
-        return nc.to_dicts(raw)
+        nc    = NewsCollector()
+        raw   = nc.fetch_by_ticker(ticker, market, hours=48)
+        total = len(raw)
+        filtered = nc.filter_relevant(raw, ticker, market)
+        return nc.to_dicts(filtered), total
     except Exception:
-        return []
+        return [], 0
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -158,9 +161,9 @@ def _load_peers(ticker: str) -> dict | None:
 st.title("🎯  종합 분석")
 
 with st.spinner(f"'{ticker}' 데이터 수집 중… (가격 · 지표 · 뉴스 · 시장 분위기)"):
-    df, info      = _load_price(ticker)
-    articles      = _load_news(ticker, market)
-    fg            = _load_fg()
+    df, info                 = _load_price(ticker)
+    articles, total_collected = _load_news(ticker, market)
+    fg                       = _load_fg()
 
 if df.empty:
     st.error(f"'{ticker}' 가격 데이터를 불러올 수 없습니다. 티커 코드를 확인하세요.")
@@ -243,13 +246,17 @@ with st.expander("📊 차트 보기 (6개월)", expanded=False):
 
 st.divider()
 
-# ── Section 2: 뉴스/센티먼트 ────────────────────────────────────────────────
-st.markdown("### 2️⃣  뉴스 / 센티먼트 (최근 48시간)")
+# ── Section 2: 종목 관련 뉴스 ────────────────────────────────────────────────
+st.markdown("### 2️⃣  종목 관련 뉴스")
+
+_trusted_sources = TRUSTED_PUBLISHERS.get(market, [])
+pos_words = {"급등", "상승", "호재", "사상최고", "기록", "흑자", "상향", "매수", "긍정", "성장", "기대"}
+neg_words = {"급락", "하락", "악재", "적자", "하향", "매도", "부정", "우려", "위기", "손실", "경고"}
+
+if total_collected > 0:
+    st.caption(f"{total_collected}건 수집 → {len(articles)}건 관련 뉴스 필터링")
 
 if articles:
-    # Simple rule-based overall sentiment
-    pos_words = {"급등", "상승", "호재", "사상최고", "기록", "흑자", "상향", "매수", "긍정", "성장", "기대"}
-    neg_words = {"급락", "하락", "악재", "적자", "하향", "매도", "부정", "우려", "위기", "손실", "경고"}
     pos_cnt = sum(
         1 for a in articles[:10]
         if any(w in (a.get("title", "") + a.get("summary", "")) for w in pos_words)
@@ -285,12 +292,13 @@ if articles:
             is_pos = any(w in title for w in pos_words)
             is_neg = any(w in title for w in neg_words)
             dot_color = "#26a69a" if is_pos else ("#ef5350" if is_neg else "#888")
+            trust_icon = "✅" if (_trusted_sources and any(t in source for t in _trusted_sources)) else "⚠️"
             line = (
                 f'<div style="display:flex;gap:8px;padding:5px 0;'
                 f'border-bottom:1px solid rgba(255,255,255,0.07)">'
                 f'  <span style="color:{dot_color};margin-top:2px">●</span>'
                 f'  <div>'
-                f'    <span style="color:#888;font-size:11px">[{source}] {pub}</span><br>'
+                f'    <span style="color:#888;font-size:11px">{trust_icon} [{source}] {pub}</span><br>'
             )
             if url:
                 line += f'    <a href="{url}" target="_blank" style="color:#ccc;font-size:13px;text-decoration:none">{title}</a>'
@@ -299,7 +307,10 @@ if articles:
             line += "  </div></div>"
             st.markdown(line, unsafe_allow_html=True)
 else:
-    st.caption("최근 48시간 내 관련 뉴스가 없습니다.")
+    if total_collected > 0:
+        st.caption("관련 뉴스를 찾을 수 없습니다. (종목명·티커가 포함된 기사 없음)")
+    else:
+        st.caption("최근 48시간 내 뉴스를 수집할 수 없습니다.")
     sent_label = "😐 중립"
     pos_cnt = neg_cnt = 0
 
@@ -445,9 +456,13 @@ def _build_prompt() -> str:
             f"- [{a.get('source', '')}] {a.get('title', '')} ({(a.get('published_at') or '')[:10]})"
             for a in articles[:5]
         )
-        news_txt = f"전반 감성: {sent_label} (긍정 {pos_cnt} · 부정 {neg_cnt} / {min(len(articles),10)}건)\n\n{news_lines}"
+        news_txt = (
+            f"수집 {total_collected}건 → 관련 뉴스 {len(articles)}건\n"
+            f"전반 감성: {sent_label} (긍정 {pos_cnt} · 부정 {neg_cnt} / {min(len(articles),10)}건)\n\n"
+            f"{news_lines}"
+        )
     else:
-        news_txt = "최근 48시간 내 관련 뉴스 없음"
+        news_txt = f"수집 {total_collected}건 → 관련 뉴스 없음 (종목명·티커 포함 기사 없음)"
 
     # peer
     if peer_result:
@@ -495,7 +510,7 @@ def _build_prompt() -> str:
 
 ---
 
-## 2️⃣ 뉴스 / 센티먼트 (최근 48시간)
+## 2️⃣ 종목 관련 뉴스
 
 {news_txt}
 

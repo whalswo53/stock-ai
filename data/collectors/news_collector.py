@@ -13,7 +13,10 @@ from typing import Optional
 import feedparser
 import yfinance as yf
 
-from config.sources import BLOCKED_KEYWORDS, RSS_FEEDS, TRUSTED_PUBLISHERS
+from config.sources import (
+    BLOCKED_KEYWORDS, RSS_FEEDS, TRUSTED_PUBLISHERS,
+    TICKER_KR_NAME, KOSPI_TICKER_MAP, NASDAQ_TICKER_MAP,
+)
 
 
 @dataclass
@@ -178,6 +181,43 @@ class NewsCollector:
                 seen.add(key)
                 out.append(a)
         return out
+
+    def build_filter_keywords(self, ticker: str, market: str) -> set[str]:
+        """Returns keywords (company names / ticker symbol) for relevance filtering."""
+        keywords: set[str] = set()
+        if market in ("KOSPI", "KOSDAQ"):
+            kr_name = TICKER_KR_NAME.get(ticker, "")
+            if kr_name:
+                keywords.add(kr_name)
+            for name, t in KOSPI_TICKER_MAP.items():
+                if t == ticker and len(name) >= 2:
+                    keywords.add(name)
+        else:
+            base = ticker.split(".")[0]
+            if len(base) >= 2:
+                keywords.add(base)
+            for name, t in NASDAQ_TICKER_MAP.items():
+                if t == base and len(name) >= 2:
+                    keywords.add(name)
+        return {k for k in keywords if k}
+
+    def filter_relevant(self, articles: list[Article], ticker: str, market: str) -> list[Article]:
+        """Keeps only articles whose title/summary mentions the company or ticker."""
+        keywords = self.build_filter_keywords(ticker, market)
+        if not keywords:
+            return articles
+        is_kr = market in ("KOSPI", "KOSDAQ")
+        result = []
+        for a in articles:
+            text = a.title + " " + a.summary
+            if is_kr:
+                if any(kw in text for kw in keywords):
+                    result.append(a)
+            else:
+                text_lower = text.lower()
+                if any(kw.lower() in text_lower for kw in keywords):
+                    result.append(a)
+        return result
 
     def to_dicts(self, articles: list[Article]) -> list[dict]:
         return [
