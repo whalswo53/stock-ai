@@ -11,7 +11,7 @@ v3 변경:
 from __future__ import annotations
 
 import sys
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 
 _root = Path(__file__).resolve().parent.parent.parent
@@ -91,10 +91,9 @@ def _fetch_sector(ticker: str) -> str:
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def _fetch_benchmark_return(bm_ticker: str, from_date_str: str) -> float | None:
+def _fetch_benchmark_return(bm_ticker: str) -> float | None:
     try:
-        start = datetime.strptime(from_date_str, "%Y-%m-%d").date()
-        hist  = yf.Ticker(bm_ticker).history(start=str(start), end=str(date.today()))
+        hist = yf.Ticker(bm_ticker).history(period="1y")
         if len(hist) < 2:
             return None
         return float((hist["Close"].iloc[-1] / hist["Close"].iloc[0] - 1) * 100)
@@ -428,16 +427,9 @@ with tab_dash:
     st.divider()
     st.subheader("벤치마크 비교")
 
-    reg_dates = [h["created_at"][:10] for h in holdings_all if h.get("created_at")]
-    try:
-        earliest = min(reg_dates) if reg_dates else str(date.today() - timedelta(days=365))
-        datetime.strptime(earliest, "%Y-%m-%d")
-    except (ValueError, TypeError):
-        earliest = str(date.today() - timedelta(days=365))
-
     with st.spinner("벤치마크 조회 중…"):
-        bm_kospi  = _fetch_benchmark_return("^KS11", earliest)
-        bm_nasdaq = _fetch_benchmark_return("^NDX",  earliest)
+        bm_kospi  = _fetch_benchmark_return("^KS11")
+        bm_nasdaq = _fetch_benchmark_return("^NDX")
 
     bm_rows = [
         ("내 포트폴리오", total_ret),
@@ -468,7 +460,7 @@ with tab_dash:
 
     if unavailable:
         st.caption(f"⚠️ 데이터를 가져올 수 없습니다: {', '.join(unavailable)}")
-    st.caption(f"기준일: {earliest} (포트폴리오 최초 등록일) → 현재")
+    st.caption("기준일: 최근 1년 (1년치 첫 거래일 → 현재)")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
