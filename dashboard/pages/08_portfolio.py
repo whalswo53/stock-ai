@@ -91,15 +91,15 @@ def _fetch_sector(ticker: str) -> str:
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def _fetch_benchmark_return(bm_ticker: str, from_date_str: str) -> float:
+def _fetch_benchmark_return(bm_ticker: str, from_date_str: str) -> float | None:
     try:
         start = datetime.strptime(from_date_str, "%Y-%m-%d").date()
         hist  = yf.Ticker(bm_ticker).history(start=str(start), end=str(date.today()))
         if len(hist) < 2:
-            return 0.0
+            return None
         return float((hist["Close"].iloc[-1] / hist["Close"].iloc[0] - 1) * 100)
     except Exception:
-        return 0.0
+        return None
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -150,7 +150,7 @@ def build_pnl_df(holdings: list[dict], usd_krw: float = 1300.0) -> pd.DataFrame:
         total_cost  = qty * avg_cost
         total_value = qty * cp
         pnl         = total_value - total_cost
-        ret_pct     = (pnl / total_cost * 100) if total_cost > 0 else 0.0
+        ret_pct     = ((cp - avg_cost) / avg_cost * 100) if avg_cost > 0 else 0.0
 
         rows.append({
             "_id":          h["id"],
@@ -199,8 +199,8 @@ with st.sidebar:
             )
 
             col_q, col_c = st.columns(2)
-            qty_input  = col_q.number_input("수량",       min_value=0.0, step=1.0,   value=0.0)
-            cost_input = col_c.number_input("평균매입가", min_value=0.0, step=100.0, value=0.0)
+            qty_input  = col_q.text_input("수량",       placeholder="예: 10")
+            cost_input = col_c.text_input("평균매입가", placeholder="예: 50000")
 
             if group_sel == GROUP_HOLDING:
                 target_qty_input: float | None = None
@@ -227,9 +227,18 @@ with st.sidebar:
             submitted   = st.form_submit_button("추가하기", type="primary", use_container_width=True)
 
             if submitted:
+                try:
+                    qty_f = float(qty_input.strip()) if qty_input.strip() else 0.0
+                except ValueError:
+                    qty_f = 0.0
+                try:
+                    cost_f = float(cost_input.strip()) if cost_input.strip() else 0.0
+                except ValueError:
+                    cost_f = 0.0
+
                 if not raw_input.strip():
                     st.error("종목 코드 또는 이름을 입력하세요.")
-                elif group_sel == GROUP_HOLDING and (qty_input <= 0 or cost_input <= 0):
+                elif group_sel == GROUP_HOLDING and (qty_f <= 0 or cost_f <= 0):
                     st.error("'보유 중'은 수량과 평균매입가를 입력하세요.")
                 else:
                     ticker = _resolve(raw_input)
@@ -246,8 +255,8 @@ with st.sidebar:
                         pm.add_holding(
                             ticker=ticker,
                             name=name,
-                            quantity=qty_input,
-                            avg_cost=cost_input,
+                            quantity=qty_f,
+                            avg_cost=cost_f,
                             group_type=group_sel,
                             target_qty=target_qty_input,
                             accum_period=accum_period_input,
@@ -420,30 +429,45 @@ with tab_dash:
     st.subheader("벤치마크 비교")
 
     reg_dates = [h["created_at"][:10] for h in holdings_all if h.get("created_at")]
-    earliest  = min(reg_dates) if reg_dates else str(date.today() - timedelta(days=365))
+    try:
+        earliest = min(reg_dates) if reg_dates else str(date.today() - timedelta(days=365))
+        datetime.strptime(earliest, "%Y-%m-%d")
+    except (ValueError, TypeError):
+        earliest = str(date.today() - timedelta(days=365))
 
     with st.spinner("벤치마크 조회 중…"):
         bm_kospi  = _fetch_benchmark_return("^KS11", earliest)
-        bm_nasdaq = _fetch_benchmark_return("QQQ",   earliest)
+        bm_nasdaq = _fetch_benchmark_return("^NDX",  earliest)
 
-    bm_df = pd.DataFrame({
-        "구분":     ["내 포트폴리오", "KOSPI (^KS11)", "NASDAQ (QQQ)"],
-        "수익률(%)": [total_ret, bm_kospi, bm_nasdaq],
-    })
-    bm_colors    = [UP if v >= 0 else DOWN for v in bm_df["수익률(%)"]]
-    bm_colors[0] = "#7E57C2"
-    fig_bm = go.Figure(go.Bar(
-        x=bm_df["구분"], y=bm_df["수익률(%)"], marker_color=bm_colors,
-        text=[f"{v:+.2f}%" for v in bm_df["수익률(%)"]],
-        textposition="outside",
-    ))
-    fig_bm.add_hline(y=0, line_color="rgba(128,128,128,0.4)", line_width=1)
-    fig_bm.update_layout(
-        height=280, template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
-        margin=dict(l=10, r=10, t=10, b=10),
-        yaxis_title="수익률 (%)", xaxis_title="",
-    )
-    st.plotly_chart(fig_bm, width="stretch")
+    bm_rows = [
+        ("내 포트폴리오", total_ret),
+        ("KOSPI (^KS11)", bm_kospi),
+        ("NASDAQ (^NDX)", bm_nasdaq),
+    ]
+    unavailable = [label for label, v in bm_rows[1:] if v is None]
+    bm_rows_valid = [(label, v) for label, v in bm_rows if v is not None]
+
+    if bm_rows_valid:
+        bm_labels  = [r[0] for r in bm_rows_valid]
+        bm_vals    = [r[1] for r in bm_rows_valid]
+        bm_colors  = [UP if v >= 0 else DOWN for v in bm_vals]
+        if bm_labels[0] == "내 포트폴리오":
+            bm_colors[0] = "#7E57C2"
+        fig_bm = go.Figure(go.Bar(
+            x=bm_labels, y=bm_vals, marker_color=bm_colors,
+            text=[f"{v:+.2f}%" for v in bm_vals],
+            textposition="outside",
+        ))
+        fig_bm.add_hline(y=0, line_color="rgba(128,128,128,0.4)", line_width=1)
+        fig_bm.update_layout(
+            height=280, template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
+            margin=dict(l=10, r=10, t=10, b=10),
+            yaxis_title="수익률 (%)", xaxis_title="",
+        )
+        st.plotly_chart(fig_bm, width="stretch")
+
+    if unavailable:
+        st.caption(f"⚠️ 데이터를 가져올 수 없습니다: {', '.join(unavailable)}")
     st.caption(f"기준일: {earliest} (포트폴리오 최초 등록일) → 현재")
 
 
