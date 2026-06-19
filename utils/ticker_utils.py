@@ -1,7 +1,8 @@
 """
 공통 티커 유틸리티.
 - 정적 딕셔너리 (KOSPI/NASDAQ 주요 종목 + 한글명 → US 티커)
-- FinanceDataReader 기반 동적 KRX 전체 + 미국 S&P500 로드 (24시간 캐시)
+- FinanceDataReader 기반 동적 KRX 전체 + 미국 S&P500 로드 (6시간 캐시)
+- KRX 로드 실패 시 1회 재시도(3초 대기) → 하드코딩 fallback 사용
 - 주요 KRX ETF 하드코딩 (50여 종, pykrx 인증 불필요)
 - search_tickers() : 한글/영문 부분 매칭 + 우선순위 정렬
 """
@@ -17,12 +18,20 @@ from config.sources import KOSPI_TICKER_MAP, NASDAQ_TICKER_MAP, TICKER_KR_NAME a
 _NAME_TO_TICKER: dict[str, str] = {**KOSPI_TICKER_MAP, **NASDAQ_TICKER_MAP}
 _SORTED_NAMES: list[str] = sorted(_NAME_TO_TICKER, key=len, reverse=True)
 
-# ── Cache (24시간 TTL) ────────────────────────────────────────────────────────
-_CACHE_TTL = 86_400  # 24 hours
+# ── Cache (6시간 TTL) ─────────────────────────────────────────────────────────
+_CACHE_TTL = 21_600  # 6 hours (reduced from 24h — retries faster after KRX outage)
 _KRX_CACHE: dict[str, tuple[str, str]] | None = None  # {tkr: (name, market)}
 _KRX_CACHE_TS: float = 0.0
 _US_CACHE: dict[str, str] | None = None               # {symbol: name}
 _US_CACHE_TS: float = 0.0
+
+# ── KRX fallback (FDR 실패 시 사용) ──────────────────────────────────────────
+# TICKER_KR_NAME의 KS/KQ 항목을 (name, market) 형태로 변환
+_KRX_FALLBACK: dict[str, tuple[str, str]] = {
+    tkr: (name, "KOSPI" if tkr.endswith(".KS") else "KOSDAQ")
+    for tkr, name in _TICKER_KR_NAME.items()
+    if tkr.endswith((".KS", ".KQ"))
+}
 
 # ── 주요 KRX ETF (yfinance 6자리 코드 → 한글 상품명) ─────────────────────────
 # ETF는 FDR/pykrx로 가져올 수 없어 주요 50종 하드코딩. 모두 yfinance ".KS" 사용.
@@ -298,16 +307,11 @@ _NASDAQ100_EN: dict[str, str] = {
 
 # ── Dynamic loading helpers ───────────────────────────────────────────────────
 
-def _load_krx_stocks() -> dict[str, tuple[str, str]]:
+def _try_fdr_krx() -> dict[str, tuple[str, str]]:
     """
-    FDR로 KOSPI + KOSDAQ 전체 종목을 로드한다.
-    Returns {yfinance_ticker: (name, market_display)}.
-    24시간 캐시.
+    FDR로 KOSPI + KOSDAQ 전체 종목을 로드 시도.
+    실패 시 빈 dict 반환 (예외를 밖으로 전파하지 않음).
     """
-    global _KRX_CACHE, _KRX_CACHE_TS
-    if _KRX_CACHE is not None and time.time() - _KRX_CACHE_TS < _CACHE_TTL:
-        return _KRX_CACHE
-
     result: dict[str, tuple[str, str]] = {}
     try:
         import FinanceDataReader as fdr
@@ -330,8 +334,34 @@ def _load_krx_stocks() -> dict[str, tuple[str, str]]:
                 pass
     except ImportError:
         pass
+    return result
 
-    # pykrx 보조 (인증 필요 없는 경우에만 동작)
+
+def _load_krx_stocks() -> dict[str, tuple[str, str]]:
+    """
+    FDR로 KOSPI + KOSDAQ 전체 종목을 로드한다.
+    Returns {yfinance_ticker: (name, market_display)}.
+    6시간 캐시. 실패 시 3초 후 1회 재시도 → 하드코딩 fallback 사용.
+    """
+    global _KRX_CACHE, _KRX_CACHE_TS
+    if _KRX_CACHE is not None and time.time() - _KRX_CACHE_TS < _CACHE_TTL:
+        return _KRX_CACHE
+
+    # 1차 시도
+    result = _try_fdr_krx()
+
+    # 실패 시 3초 대기 후 1회 재시도
+    if not result:
+        time.sleep(3)
+        result = _try_fdr_krx()
+
+    # 재시도도 실패 → 하드코딩 fallback 사용
+    if not result:
+        _KRX_CACHE = dict(_KRX_FALLBACK)
+        _KRX_CACHE_TS = time.time()
+        return _KRX_CACHE
+
+    # pykrx 보조 (FDR 성공 시에만 실행, 인증 불필요한 경우)
     try:
         from pykrx import stock as krx
         from datetime import date
