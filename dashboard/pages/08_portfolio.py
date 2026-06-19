@@ -184,43 +184,50 @@ with st.sidebar:
 
     # ── Add holding form ──────────────────────────────────────────────────────
     with st.expander("➕ 종목 추가", expanded=pm.count() == 0):
+        # 폼 밖에 배치 → 값 변경 시 즉시 리렌더링
+        group_sel = st.radio(
+            "구분",
+            [GROUP_HOLDING, GROUP_ACCUMULATING],
+            format_func=lambda g: f"{GROUP_ICON[g]} {GROUP_LABEL[g]}",
+            horizontal=True,
+            key="add_group_sel",
+        )
+
+        _period = "매주"
+        _type   = "금액 기준"
+        if group_sel == GROUP_ACCUMULATING:
+            st.caption("**적립 계획 (선택)**")
+            col_p, col_t = st.columns(2)
+            _period = col_p.radio("적립 주기", ["매일", "매주", "매월"], horizontal=True, key="add_period")
+            _type   = col_t.radio("적립 방식", ["금액 기준", "수량 기준"], horizontal=True, key="add_type")
+
         with st.form("add_holding", clear_on_submit=True):
             raw_input = st.text_input(
                 "종목 코드 또는 한글명",
                 placeholder="예: 005930.KS · 삼성전자 · NVDA",
             )
 
-            group_sel = st.radio(
-                "구분",
-                [GROUP_HOLDING, GROUP_ACCUMULATING],
-                format_func=lambda g: f"{GROUP_ICON[g]} {GROUP_LABEL[g]}",
-                horizontal=True,
-            )
-
             col_q, col_c = st.columns(2)
             qty_input  = col_q.text_input("수량",       placeholder="예: 10")
             cost_input = col_c.text_input("평균매입가", placeholder="예: 50000")
 
-            if group_sel == GROUP_HOLDING:
-                target_qty_input: float | None = None
+            if group_sel == GROUP_ACCUMULATING:
+                target_qty_input: float | None = st.number_input(
+                    "목표 수량 (선택)", min_value=0.0, step=1.0, value=0.0
+                ) or None
+                _accum_placeholder = "예: 100000 (원)" if _type == "금액 기준" else "예: 2 (주)"
+                accum_value_str = st.text_input("적립 금액/수량", placeholder=_accum_placeholder)
+                try:
+                    accum_value_input = float(accum_value_str.strip()) if accum_value_str.strip() else 0.0
+                except ValueError:
+                    accum_value_input = 0.0
+                accum_period_input = ACCUM_PERIOD_VAL[_period]
+                accum_type_input   = ACCUM_TYPE_VAL[_type]
+            else:
+                target_qty_input   = None
                 accum_period_input = ""
                 accum_type_input   = ""
                 accum_value_input  = 0.0
-            else:
-                st.caption("**적립 계획 (선택)**")
-                target_qty_input = st.number_input(
-                    "목표 수량 (선택)", min_value=0.0, step=1.0, value=0.0
-                ) or None
-                col_p, col_t = st.columns(2)
-                _period = col_p.radio("적립 주기", ["매일", "매주", "매월"], horizontal=True)
-                _type   = col_t.radio("적립 방식", ["금액 기준", "수량 기준"], horizontal=True)
-                accum_value_input = st.number_input(
-                    "적립 금액/수량", min_value=0.0,
-                    step=10000.0 if _type == "금액 기준" else 1.0,
-                    help="금액 기준: 원(₩), 수량 기준: 주(株)",
-                )
-                accum_period_input = ACCUM_PERIOD_VAL[_period]
-                accum_type_input   = ACCUM_TYPE_VAL[_type]
 
             notes_input = st.text_input("메모 (선택)", placeholder="예: 장기 보유")
             submitted   = st.form_submit_button("추가하기", type="primary", use_container_width=True)
