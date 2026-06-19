@@ -1,26 +1,96 @@
 """
-SQLite-backed portfolio holdings manager.
+Portfolio holdings manager — Supabase (PostgreSQL) 백엔드.
 
-v2 스키마 변경:
-  - buy_date 컬럼 제거
-  - accum_period / accum_type / accum_value 추가 ("모으는 중" 적립 계획)
-  - purchase_history 테이블 추가 (개별 매수 내역)
-  - 기존 DB 자동 마이그레이션
+v3 변경: SQLite → Supabase
+  - 기존 SQLite 코드는 주석으로 보존 (롤백 대비)
+  - 메서드 인터페이스 동일 유지
+  - 테이블 DDL: portfolio/schema.sql 참고
 """
 from __future__ import annotations
 
 import csv
 import io
-import sqlite3
+import os
 import time
-from contextlib import contextmanager
 from datetime import datetime
-from pathlib import Path
-from typing import Any, Generator, Optional
+from typing import Any, Optional
 
-from config.settings import STORAGE_DIR
+from supabase import Client, create_client
 
-DB_PATH = STORAGE_DIR / "portfolio.db"
+# dotenv 로딩 보장 (config/settings.py 에서 load_dotenv() 호출)
+from config.settings import STORAGE_DIR  # noqa: F401  (side-effect import)
+
+# ── SQLite 레거시 (롤백 시 이 블록 복원) ──────────────────────────────────────
+# import sqlite3
+# from contextlib import contextmanager
+# from pathlib import Path
+# from typing import Generator
+#
+# DB_PATH = STORAGE_DIR / "portfolio.db"
+#
+# _DDL_HOLDINGS = """\
+# CREATE TABLE IF NOT EXISTS portfolio_holdings (
+#     id           INTEGER PRIMARY KEY AUTOINCREMENT,
+#     ticker       TEXT NOT NULL,
+#     name         TEXT NOT NULL DEFAULT '',
+#     quantity     REAL NOT NULL DEFAULT 0,
+#     target_qty   REAL,
+#     avg_cost     REAL NOT NULL DEFAULT 0,
+#     group_type   TEXT NOT NULL DEFAULT 'holding',
+#     accum_period TEXT NOT NULL DEFAULT '',
+#     accum_type   TEXT NOT NULL DEFAULT '',
+#     accum_value  REAL NOT NULL DEFAULT 0,
+#     sector       TEXT DEFAULT '',
+#     notes        TEXT DEFAULT '',
+#     created_at   TEXT NOT NULL,
+#     updated_at   TEXT NOT NULL
+# );\
+# """
+#
+# _DDL_HISTORY = """\
+# CREATE TABLE IF NOT EXISTS purchase_history (
+#     id          INTEGER PRIMARY KEY AUTOINCREMENT,
+#     holding_id  INTEGER NOT NULL,
+#     buy_date    TEXT NOT NULL,
+#     quantity    REAL NOT NULL,
+#     price       REAL NOT NULL,
+#     created_at  TEXT NOT NULL
+# );\
+# """
+#
+# _DDL_INDEXES = """\
+# CREATE INDEX IF NOT EXISTS idx_holdings_ticker  ON portfolio_holdings(ticker);
+# CREATE INDEX IF NOT EXISTS idx_holdings_group   ON portfolio_holdings(group_type);
+# CREATE INDEX IF NOT EXISTS idx_history_holding  ON purchase_history(holding_id);\
+# """
+#
+# _MIGRATION_V1_V2 = """\
+# CREATE TABLE portfolio_holdings_v2 (
+#     id           INTEGER PRIMARY KEY AUTOINCREMENT,
+#     ticker       TEXT NOT NULL,
+#     name         TEXT NOT NULL DEFAULT '',
+#     quantity     REAL NOT NULL DEFAULT 0,
+#     target_qty   REAL,
+#     avg_cost     REAL NOT NULL DEFAULT 0,
+#     group_type   TEXT NOT NULL DEFAULT 'holding',
+#     accum_period TEXT NOT NULL DEFAULT '',
+#     accum_type   TEXT NOT NULL DEFAULT '',
+#     accum_value  REAL NOT NULL DEFAULT 0,
+#     sector       TEXT DEFAULT '',
+#     notes        TEXT DEFAULT '',
+#     created_at   TEXT NOT NULL DEFAULT '',
+#     updated_at   TEXT NOT NULL DEFAULT ''
+# );
+# INSERT INTO portfolio_holdings_v2
+#     (id, ticker, name, quantity, target_qty, avg_cost, group_type,
+#      accum_period, accum_type, accum_value, sector, notes, created_at, updated_at)
+# SELECT id, ticker, name, quantity, target_qty, avg_cost, group_type,
+#        '', '', 0, sector, notes, created_at, updated_at
+# FROM portfolio_holdings;
+# DROP TABLE portfolio_holdings;
+# ALTER TABLE portfolio_holdings_v2 RENAME TO portfolio_holdings;\
+# """
+# ─────────────────────────────────────────────────────────────────────────────
 
 _usd_krw_cache: dict = {"rate": None, "ts": 0.0}
 
@@ -42,131 +112,63 @@ def get_usd_krw_rate() -> float:
     except Exception:
         return 1300.0
 
+
 GROUP_ACCUMULATING = "accumulating"   # 모으는 중
 GROUP_HOLDING      = "holding"        # 보유 중
 
-# ── SQL 상수 ──────────────────────────────────────────────────────────────────
 
-_DDL_HOLDINGS = """\
-CREATE TABLE IF NOT EXISTS portfolio_holdings (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    ticker       TEXT NOT NULL,
-    name         TEXT NOT NULL DEFAULT '',
-    quantity     REAL NOT NULL DEFAULT 0,
-    target_qty   REAL,
-    avg_cost     REAL NOT NULL DEFAULT 0,
-    group_type   TEXT NOT NULL DEFAULT 'holding',
-    accum_period TEXT NOT NULL DEFAULT '',
-    accum_type   TEXT NOT NULL DEFAULT '',
-    accum_value  REAL NOT NULL DEFAULT 0,
-    sector       TEXT DEFAULT '',
-    notes        TEXT DEFAULT '',
-    created_at   TEXT NOT NULL,
-    updated_at   TEXT NOT NULL
-);\
-"""
-
-_DDL_HISTORY = """\
-CREATE TABLE IF NOT EXISTS purchase_history (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    holding_id  INTEGER NOT NULL,
-    buy_date    TEXT NOT NULL,
-    quantity    REAL NOT NULL,
-    price       REAL NOT NULL,
-    created_at  TEXT NOT NULL
-);\
-"""
-
-_DDL_INDEXES = """\
-CREATE INDEX IF NOT EXISTS idx_holdings_ticker  ON portfolio_holdings(ticker);
-CREATE INDEX IF NOT EXISTS idx_holdings_group   ON portfolio_holdings(group_type);
-CREATE INDEX IF NOT EXISTS idx_history_holding  ON purchase_history(holding_id);\
-"""
-
-# buy_date 컬럼 제거 + accum 컬럼 추가 마이그레이션 SQL
-_MIGRATION_V1_V2 = """\
-CREATE TABLE portfolio_holdings_v2 (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    ticker       TEXT NOT NULL,
-    name         TEXT NOT NULL DEFAULT '',
-    quantity     REAL NOT NULL DEFAULT 0,
-    target_qty   REAL,
-    avg_cost     REAL NOT NULL DEFAULT 0,
-    group_type   TEXT NOT NULL DEFAULT 'holding',
-    accum_period TEXT NOT NULL DEFAULT '',
-    accum_type   TEXT NOT NULL DEFAULT '',
-    accum_value  REAL NOT NULL DEFAULT 0,
-    sector       TEXT DEFAULT '',
-    notes        TEXT DEFAULT '',
-    created_at   TEXT NOT NULL DEFAULT '',
-    updated_at   TEXT NOT NULL DEFAULT ''
-);
-INSERT INTO portfolio_holdings_v2
-    (id, ticker, name, quantity, target_qty, avg_cost, group_type,
-     accum_period, accum_type, accum_value, sector, notes, created_at, updated_at)
-SELECT id, ticker, name, quantity, target_qty, avg_cost, group_type,
-       '', '', 0, sector, notes, created_at, updated_at
-FROM portfolio_holdings;
-DROP TABLE portfolio_holdings;
-ALTER TABLE portfolio_holdings_v2 RENAME TO portfolio_holdings;\
-"""
+def _make_client() -> Client:
+    url = os.environ["SUPABASE_URL"]
+    key = os.environ["SUPABASE_SERVICE_KEY"]
+    return create_client(url, key)
 
 
 class PortfolioManager:
-    def __init__(self, db_path: Path = DB_PATH) -> None:
-        self.db_path = db_path
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_db()
+    def __init__(self) -> None:
+        # SQLite 롤백 시: self.db_path = db_path; self.db_path.parent.mkdir(...); self._init_db()
+        self._db: Client = _make_client()
 
-    # ── Connection ────────────────────────────────────────────────────────────
-
-    @contextmanager
-    def _conn(self) -> Generator[sqlite3.Connection, None, None]:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-        try:
-            yield conn
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
-
-    # ── DB 초기화 / 마이그레이션 ─────────────────────────────────────────────
-
-    def _init_db(self) -> None:
-        with self._conn() as conn:
-            tbl_exists = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='portfolio_holdings'"
-            ).fetchone()
-
-            if tbl_exists:
-                cols = {row[1] for row in conn.execute("PRAGMA table_info(portfolio_holdings)")}
-
-                if "buy_date" in cols:
-                    # v1 → v2 마이그레이션 (buy_date 제거, accum 컬럼 추가)
-                    conn.executescript(_MIGRATION_V1_V2)
-                else:
-                    # 이미 v2 이상: 누락된 accum 컬럼만 추가 (멱등)
-                    for col, default in [
-                        ("accum_period", "''"),
-                        ("accum_type",   "''"),
-                        ("accum_value",  "0"),
-                    ]:
-                        if col not in cols:
-                            conn.execute(
-                                f"ALTER TABLE portfolio_holdings "
-                                f"ADD COLUMN {col} TEXT NOT NULL DEFAULT {default}"
-                            )
-            else:
-                conn.execute(_DDL_HOLDINGS)
-
-            # purchase_history + 인덱스 (항상 멱등)
-            conn.execute(_DDL_HISTORY)
-            conn.executescript(_DDL_INDEXES)
+    # ── SQLite 롤백 시: _conn / _init_db 메서드 복원 ──────────────────────────
+    # @contextmanager
+    # def _conn(self) -> Generator[sqlite3.Connection, None, None]:
+    #     conn = sqlite3.connect(self.db_path)
+    #     conn.row_factory = sqlite3.Row
+    #     conn.execute("PRAGMA journal_mode=WAL")
+    #     conn.execute("PRAGMA foreign_keys=ON")
+    #     try:
+    #         yield conn
+    #         conn.commit()
+    #     except Exception:
+    #         conn.rollback()
+    #         raise
+    #     finally:
+    #         conn.close()
+    #
+    # def _init_db(self) -> None:
+    #     with self._conn() as conn:
+    #         tbl_exists = conn.execute(
+    #             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='portfolio_holdings'"
+    #         ).fetchone()
+    #         if tbl_exists:
+    #             cols = {row[1] for row in conn.execute("PRAGMA table_info(portfolio_holdings)")}
+    #             if "buy_date" in cols:
+    #                 conn.executescript(_MIGRATION_V1_V2)
+    #             else:
+    #                 for col, default in [
+    #                     ("accum_period", "''"),
+    #                     ("accum_type",   "''"),
+    #                     ("accum_value",  "0"),
+    #                 ]:
+    #                     if col not in cols:
+    #                         conn.execute(
+    #                             f"ALTER TABLE portfolio_holdings "
+    #                             f"ADD COLUMN {col} TEXT NOT NULL DEFAULT {default}"
+    #                         )
+    #         else:
+    #             conn.execute(_DDL_HOLDINGS)
+    #         conn.execute(_DDL_HISTORY)
+    #         conn.executescript(_DDL_INDEXES)
+    # ─────────────────────────────────────────────────────────────────────────
 
     # ── CRUD: 보유 종목 ───────────────────────────────────────────────────────
 
@@ -185,20 +187,26 @@ class PortfolioManager:
         notes: str = "",
     ) -> int:
         now = datetime.now().isoformat()
-        with self._conn() as conn:
-            cur = conn.execute(
-                """
-                INSERT INTO portfolio_holdings
-                    (ticker, name, quantity, target_qty, avg_cost, group_type,
-                     accum_period, accum_type, accum_value,
-                     sector, notes, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (ticker, name, quantity, target_qty, avg_cost, group_type,
-                 accum_period, accum_type, accum_value,
-                 sector, notes, now, now),
-            )
-            return int(cur.lastrowid)  # type: ignore[arg-type]
+        res = (
+            self._db.table("portfolio_holdings")
+            .insert({
+                "ticker": ticker,
+                "name": name,
+                "quantity": quantity,
+                "target_qty": target_qty,
+                "avg_cost": avg_cost,
+                "group_type": group_type,
+                "accum_period": accum_period,
+                "accum_type": accum_type,
+                "accum_value": accum_value,
+                "sector": sector,
+                "notes": notes,
+                "created_at": now,
+                "updated_at": now,
+            })
+            .execute()
+        )
+        return int(res.data[0]["id"])
 
     def update_holding(self, holding_id: int, **kwargs: Any) -> None:
         allowed = {
@@ -210,17 +218,12 @@ class PortfolioManager:
         if not fields:
             return
         fields["updated_at"] = datetime.now().isoformat()
-        sets = ", ".join(f"{k}=?" for k in fields)
-        with self._conn() as conn:
-            conn.execute(
-                f"UPDATE portfolio_holdings SET {sets} WHERE id=?",
-                (*fields.values(), holding_id),
-            )
+        self._db.table("portfolio_holdings").update(fields).eq("id", holding_id).execute()
 
     def delete_holding(self, holding_id: int) -> None:
-        with self._conn() as conn:
-            conn.execute("DELETE FROM purchase_history WHERE holding_id=?", (holding_id,))
-            conn.execute("DELETE FROM portfolio_holdings WHERE id=?", (holding_id,))
+        # purchase_history는 ON DELETE CASCADE로 자동 삭제되지만 명시적으로 처리
+        self._db.table("purchase_history").delete().eq("holding_id", holding_id).execute()
+        self._db.table("portfolio_holdings").delete().eq("id", holding_id).execute()
 
     def move_group(self, holding_id: int, new_group: str) -> None:
         self.update_holding(holding_id, group_type=new_group)
@@ -235,34 +238,37 @@ class PortfolioManager:
         price: float,
     ) -> int:
         now = datetime.now().isoformat()
-        with self._conn() as conn:
-            cur = conn.execute(
-                """
-                INSERT INTO purchase_history
-                    (holding_id, buy_date, quantity, price, created_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (holding_id, buy_date, quantity, price, now),
-            )
-            return int(cur.lastrowid)  # type: ignore[arg-type]
+        res = (
+            self._db.table("purchase_history")
+            .insert({
+                "holding_id": holding_id,
+                "buy_date": buy_date,
+                "quantity": quantity,
+                "price": price,
+                "created_at": now,
+            })
+            .execute()
+        )
+        return int(res.data[0]["id"])
 
     def get_purchases(self, holding_id: int) -> list[dict]:
-        with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM purchase_history WHERE holding_id=? ORDER BY buy_date, id",
-                (holding_id,),
-            ).fetchall()
-        return [dict(r) for r in rows]
+        res = (
+            self._db.table("purchase_history")
+            .select("*")
+            .eq("holding_id", holding_id)
+            .order("buy_date")
+            .order("id")
+            .execute()
+        )
+        return res.data
 
     def delete_purchase(self, purchase_id: int) -> None:
-        with self._conn() as conn:
-            conn.execute("DELETE FROM purchase_history WHERE id=?", (purchase_id,))
+        self._db.table("purchase_history").delete().eq("id", purchase_id).execute()
 
     def calc_accumulated(self, holding_id: int) -> tuple[float, float]:
         """
         매수 내역 + 초기 보유량을 합산해 (총수량, 평균매입가) 반환.
-        - 매수 내역이 없으면 holding의 quantity / avg_cost 그대로 반환
-        - 매수 내역이 있으면 초기 보유량(seed)과 가중 평균 계산
+        매수 내역이 없으면 holding의 quantity / avg_cost 그대로 반환.
         """
         h = self.get_by_id(holding_id)
         if not h:
@@ -275,8 +281,8 @@ class PortfolioManager:
         if not purchases:
             return seed_qty, seed_cost
 
-        ph_qty   = sum(float(p["quantity"]) for p in purchases)
-        ph_cost  = sum(float(p["quantity"]) * float(p["price"]) for p in purchases)
+        ph_qty  = sum(float(p["quantity"]) for p in purchases)
+        ph_cost = sum(float(p["quantity"]) * float(p["price"]) for p in purchases)
 
         total_qty  = seed_qty + ph_qty
         total_cost = seed_qty * seed_cost + ph_cost
@@ -286,32 +292,37 @@ class PortfolioManager:
     # ── Queries ───────────────────────────────────────────────────────────────
 
     def get_all(self) -> list[dict]:
-        with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM portfolio_holdings ORDER BY group_type, created_at"
-            ).fetchall()
-        return [dict(r) for r in rows]
+        res = (
+            self._db.table("portfolio_holdings")
+            .select("*")
+            .order("group_type")
+            .order("created_at")
+            .execute()
+        )
+        return res.data
 
     def get_by_group(self, group_type: str) -> list[dict]:
-        with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM portfolio_holdings WHERE group_type=? ORDER BY created_at",
-                (group_type,),
-            ).fetchall()
-        return [dict(r) for r in rows]
+        res = (
+            self._db.table("portfolio_holdings")
+            .select("*")
+            .eq("group_type", group_type)
+            .order("created_at")
+            .execute()
+        )
+        return res.data
 
     def get_by_id(self, holding_id: int) -> Optional[dict]:
-        with self._conn() as conn:
-            row = conn.execute(
-                "SELECT * FROM portfolio_holdings WHERE id=?", (holding_id,)
-            ).fetchone()
-        return dict(row) if row else None
+        res = (
+            self._db.table("portfolio_holdings")
+            .select("*")
+            .eq("id", holding_id)
+            .execute()
+        )
+        return res.data[0] if res.data else None
 
     def count(self) -> int:
-        with self._conn() as conn:
-            return int(conn.execute(
-                "SELECT COUNT(*) FROM portfolio_holdings"
-            ).fetchone()[0])
+        res = self._db.table("portfolio_holdings").select("id", count="exact").execute()
+        return res.count or 0
 
     # ── CSV import ────────────────────────────────────────────────────────────
 

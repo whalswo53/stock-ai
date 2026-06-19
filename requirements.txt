@@ -13,3 +13,4 @@ finance-datareader>=0.9.0
 jinja2
 fear-and-greed>=0.4
 pykrx>=1.0
+supabase>=2.0.0
