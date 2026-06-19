@@ -118,8 +118,29 @@ GROUP_HOLDING      = "holding"        # 보유 중
 
 
 def _make_client() -> Client:
-    url = os.environ["SUPABASE_URL"]
-    key = os.environ["SUPABASE_SERVICE_KEY"]
+    url = os.getenv("SUPABASE_URL")
+    key = os.getenv("SUPABASE_SERVICE_KEY")
+
+    # Streamlit Cloud: secrets.toml fallback
+    if not url or not key:
+        try:
+            import streamlit as st
+            url = url or st.secrets.get("SUPABASE_URL")
+            key = key or st.secrets.get("SUPABASE_SERVICE_KEY")
+        except Exception:
+            pass
+
+    if not url:
+        raise RuntimeError(
+            "SUPABASE_URL이 설정되지 않았습니다. "
+            ".env 파일 또는 Streamlit secrets (secrets.toml)를 확인하세요."
+        )
+    if not key:
+        raise RuntimeError(
+            "SUPABASE_SERVICE_KEY가 설정되지 않았습니다. "
+            ".env 파일 또는 Streamlit secrets (secrets.toml)를 확인하세요."
+        )
+
     return create_client(url, key)
 
 
@@ -321,8 +342,21 @@ class PortfolioManager:
         return res.data[0] if res.data else None
 
     def count(self) -> int:
-        res = self._db.table("portfolio_holdings").select("id", count="exact").execute()
-        return res.count or 0
+        try:
+            from postgrest.exceptions import APIError
+        except ImportError:
+            APIError = Exception  # type: ignore[misc,assignment]
+        try:
+            res = self._db.table("portfolio_holdings").select("id", count="exact").execute()
+            return res.count or 0
+        except APIError as exc:
+            raise RuntimeError(
+                f"portfolio_holdings 테이블 조회 실패.\n"
+                f"원인: {exc}\n"
+                f"확인사항: ① schema.sql 실행 여부  "
+                f"② SUPABASE_URL/SERVICE_KEY 정확성  "
+                f"③ Supabase 프로젝트 활성 상태"
+            ) from exc
 
     # ── CSV import ────────────────────────────────────────────────────────────
 
