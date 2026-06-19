@@ -112,18 +112,21 @@ def _load_fg() -> str:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def _validate_and_fetch_name(ticker: str) -> tuple[bool, str]:
-    """yfinance 티커 유효성 확인 + 종목명 반환 (valid, longName)."""
+    """yfinance 티커 유효성 확인 + 종목명 반환 (valid, longName).
+
+    history() 기반으로 유효성을 먼저 판단하고, info는 이름 조회에만 사용.
+    소형/중형주처럼 info가 불완전해도 거래 데이터가 있으면 유효로 처리.
+    """
     try:
-        info = yf.Ticker(ticker).info
-        name = info.get("longName") or info.get("shortName") or ""
-        has_price = any(
-            info.get(k) is not None
-            for k in ("regularMarketPrice", "currentPrice",
-                      "previousClose", "regularMarketPreviousClose")
-        )
-        if not has_price:
-            hist = yf.Ticker(ticker).history(period="5d")
-            return (not hist.empty), name
+        t = yf.Ticker(ticker)
+        hist = t.history(period="5d")
+        if hist.empty:
+            return False, ""
+        try:
+            info = t.info
+            name = info.get("longName") or info.get("shortName") or ""
+        except Exception:
+            name = ""
         return True, name
     except Exception:
         return False, ""
