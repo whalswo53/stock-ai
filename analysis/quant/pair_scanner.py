@@ -314,11 +314,46 @@ _YF_TO_GICS: dict[str, str] = {
 
 # ── Process-level cached listing loaders (re-fetched only on server restart) ──
 
+def _github_krx_csv(subpath: str) -> pd.DataFrame:
+    """Fetches KRX listing CSV directly from FDR's GitHub cache.
+
+    Bypasses data.krx.co.kr (which returns 403 in cloud environments).
+    Tries recent business days until a file is found (up to 14 calendar days back).
+    subpath: 'krx' for marcap listing, 'desc' for descriptive (Industry) listing.
+    """
+    import io
+    import requests
+    from datetime import date, timedelta
+
+    base = (
+        'https://raw.githubusercontent.com/FinanceData/'
+        'fdr_krx_data_cache/refs/heads/master/data/listing'
+    )
+    today = date.today()
+    for delta in range(14):
+        d = today - timedelta(days=delta)
+        if d.weekday() >= 5:
+            continue
+        url = f'{base}/{subpath}/{d.strftime("%Y-%m-%d")}.csv'
+        try:
+            r = requests.get(url, timeout=8)
+            if r.status_code == 200:
+                return pd.read_csv(io.StringIO(r.text), dtype={'Code': str})
+        except Exception:
+            continue
+    raise ValueError(f"GitHub KRX cache ({subpath}) 데이터를 가져올 수 없습니다.")
+
+
 @cache
 def _load_krx_listing() -> pd.DataFrame:
-    """Loads KRX full listing (Code, Name, Market, Marcap). No sector column."""
+    """Loads KRX full listing (Code, Name, Market, Marcap).
+    Tries FDR first; falls back to GitHub direct fetch if data.krx.co.kr is blocked.
+    """
     import FinanceDataReader as fdr
-    df = fdr.StockListing('KRX')
+    try:
+        df = fdr.StockListing('KRX')
+    except Exception:
+        df = _github_krx_csv('krx')
     df['Code']  = df['Code'].astype(str).str.zfill(6)
     df['Marcap'] = pd.to_numeric(df.get('Marcap', pd.Series(dtype=float)), errors='coerce').fillna(0)
     return df
@@ -333,9 +368,14 @@ def _load_sp500_listing() -> pd.DataFrame:
 
 @cache
 def _load_krx_desc() -> pd.DataFrame:
-    """Loads KRX-DESC listing (Code, Name, Market, Sector, Industry). Process-level cache."""
+    """Loads KRX-DESC listing (Code, Name, Market, Sector, Industry).
+    Tries FDR first; falls back to GitHub direct fetch if data.krx.co.kr is blocked.
+    """
     import FinanceDataReader as fdr
-    df = fdr.StockListing('KRX-DESC')
+    try:
+        df = fdr.StockListing('KRX-DESC')
+    except Exception:
+        df = _github_krx_csv('desc')
     df['Code'] = df['Code'].astype(str).str.zfill(6)
     return df
 
