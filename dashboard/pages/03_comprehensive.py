@@ -84,7 +84,7 @@ def _load_fg() -> FearGreedResult:
     return MarketSentimentCollector().fetch()
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=172800, show_spinner=False)  # 48h — reduces yfinance re-fetch frequency
 def _load_peers(ticker: str) -> dict | None:
     """
     INDUSTRY_GROUPS에서 동종 종목을 찾아 ratio Z-score를 계산한다.

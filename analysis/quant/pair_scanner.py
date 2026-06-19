@@ -18,10 +18,16 @@ US tickers:
 from __future__ import annotations
 
 import itertools
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import cache
 from typing import Callable, Optional
+
+try:
+    from yfinance.exceptions import YFRateLimitError as _YFRateLimitError
+except ImportError:
+    _YFRateLimitError = Exception  # older yfinance versions
 
 import numpy as np
 import pandas as pd
@@ -329,20 +335,28 @@ def _load_sp500_listing() -> pd.DataFrame:
 # ── Parallel yfinance info helper ─────────────────────────────────────────────
 
 def _fetch_yf_info(ticker: str) -> tuple[str, str, str, str]:
-    """Returns (ticker, sector, industry, shortName) via yfinance."""
+    """Returns (ticker, sector, industry, shortName) via yfinance.
+    Returns empty strings on rate-limit or any other error so callers can skip gracefully.
+    """
     import yfinance as yf
-    info = yf.Ticker(ticker).info
-    return (
-        ticker,
-        info.get('sector',    ''),
-        info.get('industry',  ''),
-        info.get('shortName', ticker),
-    )
+    time.sleep(0.5)  # throttle each thread to stay under rate limits
+    try:
+        info = yf.Ticker(ticker).info
+        return (
+            ticker,
+            info.get('sector',    ''),
+            info.get('industry',  ''),
+            info.get('shortName', ticker),
+        )
+    except _YFRateLimitError:
+        return ticker, '', '', ticker
+    except Exception:
+        return ticker, '', '', ticker
 
 
 def _parallel_yf_info(
     tickers: list[str],
-    max_workers: int = 10,
+    max_workers: int = 3,  # reduced from 10 — avoids rate-limit bursts
 ) -> dict[str, dict[str, str]]:
     """Fetches sector / industry / shortName for many tickers concurrently."""
     result: dict[str, dict[str, str]] = {}
@@ -392,16 +406,22 @@ class PeerDiscovery:
         import yfinance as yf
 
         suffix = '.KS' if ticker.endswith('.KS') else '.KQ'
-        code   = ticker[:-3]
 
-        # Seed sector from yfinance
-        info = yf.Ticker(ticker).info
-        seed_sector   = info.get('sector',    '')
-        seed_industry = info.get('industry',  '')
+        # Seed: get sector/industry — skip gracefully on rate-limit or network error
+        seed_sector = ''
+        seed_industry = ''
+        try:
+            info = yf.Ticker(ticker).info
+            seed_sector   = info.get('sector',    '')
+            seed_industry = info.get('industry',  '')
+            time.sleep(0.5)
+        except (_YFRateLimitError, Exception):
+            pass
+
         if not seed_industry:
             raise ValueError(
                 f"Yahoo Finance에서 '{ticker}' 업종 정보를 찾을 수 없습니다. "
-                "유효한 KOSPI/KOSDAQ 티커인지 확인해주세요."
+                "잠시 후 다시 시도하거나 유효한 KOSPI/KOSDAQ 티커인지 확인해주세요."
             )
 
         # FDR KRX → top market-cap candidates
@@ -454,14 +474,22 @@ class PeerDiscovery:
     def _find_us_peers(self, ticker: str) -> PeerGroup:
         import yfinance as yf
 
-        info = yf.Ticker(ticker).info
-        seed_sector   = info.get('sector',    '')
-        seed_industry = info.get('industry',  '')
-        seed_name     = info.get('shortName', ticker)
+        seed_sector = ''
+        seed_industry = ''
+        seed_name = ticker
+        try:
+            info = yf.Ticker(ticker).info
+            seed_sector   = info.get('sector',    '')
+            seed_industry = info.get('industry',  '')
+            seed_name     = info.get('shortName', ticker)
+            time.sleep(0.5)
+        except (_YFRateLimitError, Exception):
+            pass
+
         if not seed_sector:
             raise ValueError(
                 f"Yahoo Finance에서 '{ticker}' 섹터 정보를 찾을 수 없습니다. "
-                "유효한 NASDAQ/NYSE 티커인지 확인해주세요."
+                "잠시 후 다시 시도하거나 유효한 NASDAQ/NYSE 티커인지 확인해주세요."
             )
 
         # S&P500 uses GICS sector names; map yfinance → GICS
