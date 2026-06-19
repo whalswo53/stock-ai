@@ -331,6 +331,15 @@ def _load_sp500_listing() -> pd.DataFrame:
     return fdr.StockListing('S&P500')
 
 
+@cache
+def _load_krx_desc() -> pd.DataFrame:
+    """Loads KRX-DESC listing (Code, Name, Market, Sector, Industry). Process-level cache."""
+    import FinanceDataReader as fdr
+    df = fdr.StockListing('KRX-DESC')
+    df['Code'] = df['Code'].astype(str).str.zfill(6)
+    return df
+
+
 # ── Korean peer discovery helpers ────────────────────────────────────────────
 
 _NAVER_HEADERS = {
@@ -501,6 +510,62 @@ def _kr_peers_via_pykrx(ticker: str, top_n: int) -> "PeerGroup":
     )
 
 
+def _kr_peers_via_fdr(ticker: str, top_n: int) -> "PeerGroup":
+    """Third-fallback KR peer source: FDR KRX-DESC Industry classification.
+
+    KRX-DESC provides an Industry column (KIS 업종 분류) for all listed stocks.
+    Combined with KRX Marcap for market-cap ranking.
+    """
+    code = ticker[:-3]
+
+    desc = _load_krx_desc()
+    seed_row = desc[desc['Code'] == code]
+    if seed_row.empty:
+        raise ValueError(f"KRX-DESC 데이터에서 '{ticker}' 종목을 찾을 수 없습니다.")
+
+    industry = str(seed_row.iloc[0]['Industry'])
+    if not industry or industry == 'nan':
+        raise ValueError(f"KRX-DESC 데이터에서 '{ticker}' 업종 정보가 없습니다.")
+
+    same_ind = desc[desc['Industry'] == industry][['Code', 'Name', 'Market']].copy()
+
+    # Rank by Marcap from KRX listing
+    krx = _load_krx_listing()
+    code_to_marcap = dict(zip(krx['Code'], krx['Marcap']))
+    same_ind['Marcap'] = same_ind['Code'].map(code_to_marcap).fillna(0)
+    same_ind = same_ind.sort_values('Marcap', ascending=False)
+
+    # Ensure seed is first
+    ranked_df = pd.concat([
+        same_ind[same_ind['Code'] == code],
+        same_ind[same_ind['Code'] != code],
+    ]).head(top_n)
+
+    peers: list[str] = []
+    names: dict[str, str] = {}
+    for _, r in ranked_df.iterrows():
+        c   = str(r['Code'])
+        mkt = str(r['Market'])
+        suffix = '.KQ' if 'KOSDAQ' in mkt else '.KS'
+        tkr = f'{c}{suffix}'
+        peers.append(tkr)
+        names[tkr] = str(r['Name'])
+
+    if ticker not in peers:
+        peers = [ticker] + peers[:top_n - 1]
+        seed_name = str(seed_row.iloc[0]['Name'])
+        names.setdefault(ticker, seed_name)
+
+    return PeerGroup(
+        seed_ticker=ticker,
+        sector=industry,
+        industry=industry,
+        source='FDR KRX-DESC 업종 분류 + FDR 시가총액 순위',
+        tickers=peers,
+        names=names,
+    )
+
+
 # ── Main class ────────────────────────────────────────────────────────────────
 
 class PeerDiscovery:
@@ -509,9 +574,10 @@ class PeerDiscovery:
 
     Korean (.KS/.KQ)
     ─────────────────
-    Primary  : 네이버 금융 업종(upjong) 분류 → KRX 공식 업종 기준
-    Fallback : pykrx get_market_sector_classifications
-    → 출처: "네이버 금융 업종 분류 (KRX 기준) + FDR 시가총액 순위"
+    Primary    : 네이버 금융 업종(upjong) 분류 → KRX 공식 업종 기준
+    Fallback 1 : pykrx get_market_sector_classifications
+    Fallback 2 : FDR KRX-DESC Industry 컬럼
+    → 출처: 각 소스 표기
 
     US tickers
     ──────────
@@ -544,11 +610,17 @@ class PeerDiscovery:
         except Exception as e:
             errors.append(f"네이버 금융: {e}")
 
-        # Fallback: pykrx
+        # Fallback 1: pykrx
         try:
             return _kr_peers_via_pykrx(ticker, self.top_n)
         except Exception as e:
             errors.append(f"pykrx: {e}")
+
+        # Fallback 2: FDR KRX-DESC Industry column
+        try:
+            return _kr_peers_via_fdr(ticker, self.top_n)
+        except Exception as e:
+            errors.append(f"FDR KRX-DESC: {e}")
 
         raise ValueError(
             "업종 정보를 가져올 수 없습니다. 직접 분석 탭을 이용해주세요.\n"
