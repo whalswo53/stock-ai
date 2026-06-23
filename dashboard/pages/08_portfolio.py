@@ -308,7 +308,7 @@ with st.sidebar:
             "📄 CSV 템플릿 다운로드",
             data=PortfolioManager.csv_template(),
             file_name="portfolio_template.csv",
-            mime="text/csv",
+            mime="text/csv; charset=utf-8-sig",
             use_container_width=True,
         )
 

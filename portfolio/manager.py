@@ -434,8 +434,8 @@ class PortfolioManager:
     # ── CSV template ──────────────────────────────────────────────────────────
 
     @staticmethod
-    def csv_template() -> str:
-        header = "종목코드,종목명,수량,평균매입가,그룹,목표수량,적립주기,적립방식,적립금액,메모"
+    def csv_template() -> bytes:
+        header  = "종목코드,종목명,수량,평균매입가,그룹,목표수량,적립주기,적립방식,적립금액,메모"
         sample1 = "005930.KS,삼성전자,10,70000,보유 중,,,,,장기 보유"
         sample2 = "NVDA,,0,0,모으는 중,20,weekly,amount,100000,매주 10만원 적립"
-        return f"{header}\n{sample1}\n{sample2}\n"
+        return f"{header}\n{sample1}\n{sample2}\n".encode("utf-8-sig")
