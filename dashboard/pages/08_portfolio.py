@@ -352,13 +352,20 @@ if not holdings_all:
 
 # ── 자동 적립 매수 내역 기록 (세션당 1회) ────────────────────────────────────
 if "auto_record_done" not in st.session_state:
-    with st.spinner("자동 적립 기록 확인 중…"):
-        _auto_results = pm.auto_record_purchases(usd_krw=usd_krw)
     st.session_state["auto_record_done"] = True
-    if _auto_results:
-        st.cache_data.clear()
-        for _ar_name, _ar_ticker, _ar_n in _auto_results:
-            st.toast(f"✅ {_ar_name} ({_ar_ticker}): {_ar_n}건 자동 적립 기록됨")
+    if not hasattr(pm, "auto_record_purchases"):
+        st.warning("auto_record_purchases 메서드를 찾을 수 없습니다. 앱을 재시작하세요.")
+    else:
+        with st.spinner("자동 적립 기록 확인 중…"):
+            try:
+                _auto_results = pm.auto_record_purchases(usd_krw=usd_krw)
+            except Exception as _ar_err:
+                _auto_results = []
+                st.warning(f"자동 적립 기록 중 오류: {_ar_err}")
+        if _auto_results:
+            st.cache_data.clear()
+            for _ar_name, _ar_ticker, _ar_n in _auto_results:
+                st.toast(f"✅ {_ar_name} ({_ar_ticker}): {_ar_n}건 자동 적립 기록됨")
 
 with st.spinner("현재가 조회 중…"):
     df_all = build_pnl_df(holdings_all, usd_krw)
