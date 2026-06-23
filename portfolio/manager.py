@@ -8,11 +8,12 @@ v3 변경: SQLite → Supabase
 """
 from __future__ import annotations
 
+import calendar
 import csv
 import io
 import os
 import time
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Optional
 
 from supabase import Client, create_client
@@ -115,6 +116,47 @@ def get_usd_krw_rate() -> float:
 
 GROUP_ACCUMULATING = "accumulating"   # 모으는 중
 GROUP_HOLDING      = "holding"        # 보유 중
+
+
+def _accum_dates(start: date, end: date, period: str, ref_date: date) -> list[date]:
+    """적립 주기에 맞는 날짜 목록 반환 (start 이상 end 이하).
+
+    - daily  : 영업일(월~금)
+    - weekly : ref_date 와 같은 요일
+    - monthly: ref_date 와 같은 일 (월말 초과 시 말일로 클램프)
+    """
+    result: list[date] = []
+
+    if period == "daily":
+        d = start
+        while d <= end:
+            if d.weekday() < 5:
+                result.append(d)
+            d += timedelta(days=1)
+
+    elif period == "weekly":
+        target_wd  = ref_date.weekday()
+        days_ahead = (target_wd - start.weekday()) % 7
+        d = start + timedelta(days=days_ahead)
+        while d <= end:
+            result.append(d)
+            d += timedelta(weeks=1)
+
+    elif period == "monthly":
+        target_day  = ref_date.day
+        month_cursor = start.replace(day=1)
+        while month_cursor <= end:
+            last_day  = calendar.monthrange(month_cursor.year, month_cursor.month)[1]
+            effective = min(target_day, last_day)
+            candidate = month_cursor.replace(day=effective)
+            if start <= candidate <= end:
+                result.append(candidate)
+            if month_cursor.month == 12:
+                month_cursor = month_cursor.replace(year=month_cursor.year + 1, month=1)
+            else:
+                month_cursor = month_cursor.replace(month=month_cursor.month + 1)
+
+    return result
 
 
 def _make_client() -> Client:
@@ -311,6 +353,118 @@ class PortfolioManager:
         total_cost = seed_qty * seed_cost + ph_cost
         avg_cost   = total_cost / total_qty if total_qty > 0 else 0.0
         return total_qty, avg_cost
+
+    def auto_record_purchases(
+        self,
+        usd_krw: float = 1300.0,
+    ) -> list[tuple[str, str, int]]:
+        """모으는 중 종목의 자동 적립 매수 내역 생성.
+
+        마지막 매수일(또는 등록일)부터 오늘까지 적립 주기에 맞는 날짜에
+        yfinance 종가 기준으로 purchase_history 레코드를 자동 생성.
+        해당 날짜에 이미 내역이 있으면 건너뜀(멱등).
+
+        통화 처리:
+          - accum_currency=KRW + 미국 종목 → 금액을 usd_krw 로 나눠 USD 환산 후 수량 계산
+          - accum_currency=USD              → 금액 그대로 USD 로 수량 계산
+
+        Returns:
+            [(종목명, 티커, 추가건수), ...]  1건 이상 추가된 종목만 포함
+        """
+        import pandas as pd
+        import yfinance as yf
+
+        results: list[tuple[str, str, int]] = []
+
+        for h in self.get_by_group(GROUP_ACCUMULATING):
+            accum_period = (h.get("accum_period") or "").strip()
+            accum_type   = (h.get("accum_type")   or "").strip()
+            accum_value  = float(h.get("accum_value") or 0)
+
+            if not (accum_period and accum_type and accum_value > 0):
+                continue
+
+            hid      = int(h["id"])
+            ticker   = h["ticker"]
+            name     = h.get("name") or ticker
+            currency = h.get("accum_currency") or "KRW"
+            is_us    = not ticker.upper().endswith((".KS", ".KQ"))
+
+            ref_date = date.fromisoformat(h["created_at"][:10])
+
+            purchases      = self.get_purchases(hid)
+            existing_dates = {p["buy_date"] for p in purchases}
+
+            if purchases:
+                last = date.fromisoformat(max(p["buy_date"] for p in purchases))
+                start = last + timedelta(days=1)
+            else:
+                start = ref_date
+
+            today = date.today()
+            if start > today:
+                continue
+
+            target_dates = _accum_dates(start, today, accum_period, ref_date)
+            new_dates    = [d for d in target_dates if str(d) not in existing_dates]
+            if not new_dates:
+                continue
+
+            # ── 가격 데이터 다운로드 ─────────────────────────────────────────
+            try:
+                raw = yf.download(
+                    ticker,
+                    start=str(start),
+                    end=str(today + timedelta(days=1)),
+                    auto_adjust=True,
+                    progress=False,
+                )
+                if raw.empty:
+                    continue
+                close_s = (
+                    raw["Close"].iloc[:, 0]
+                    if isinstance(raw.columns, pd.MultiIndex)
+                    else raw["Close"]
+                )
+                close_dict: dict[str, float] = {
+                    idx.strftime("%Y-%m-%d"): float(val)
+                    for idx, val in close_s.items()
+                    if not pd.isna(val)
+                }
+            except Exception:
+                continue
+
+            # ── 날짜별 매수 추가 ─────────────────────────────────────────────
+            n_added = 0
+            for d in new_dates:
+                price = close_dict.get(str(d))
+                if not price or price <= 0:
+                    continue  # 해당일 거래 없음(휴장 등) → 건너뜀
+
+                if accum_type == "amount":
+                    amount_usd = (accum_value / usd_krw) if (currency == "KRW" and is_us) else accum_value
+                    qty = amount_usd / price
+                else:
+                    qty = accum_value
+
+                if qty <= 0:
+                    continue
+
+                try:
+                    self.add_purchase(
+                        holding_id=hid,
+                        buy_date=str(d),
+                        quantity=round(qty, 6),
+                        price=price,
+                    )
+                    n_added += 1
+                except Exception:
+                    pass
+
+            if n_added > 0:
+                results.append((name, ticker, n_added))
+
+        return results
 
     # ── Queries ───────────────────────────────────────────────────────────────
 
