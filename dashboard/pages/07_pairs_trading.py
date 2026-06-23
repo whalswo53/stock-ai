@@ -17,6 +17,7 @@ from analysis.quant.aggregator import AggregatedPairResult, QuantAggregator
 from analysis.quant.mean_reversion import MeanReversionResult
 from analysis.quant.pair_scanner import (
     INDUSTRY_GROUPS,
+    KMeansPeerDiscovery,
     PairScanner,
     PairScanResult,
     PeerDiscovery,
@@ -237,8 +238,11 @@ def _restore_prices(raw: dict[str, list]) -> dict[str, pd.Series]:
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def _discover_peers(seed_ticker: str, top_n: int) -> tuple:
-    pg = PeerDiscovery(top_n=top_n, scan_depth=80).find(seed_ticker)
+def _discover_peers(seed_ticker: str, top_n: int, method: str = "sector") -> tuple:
+    if method == "kmeans":
+        pg = KMeansPeerDiscovery(top_n=top_n).find(seed_ticker)
+    else:
+        pg = PeerDiscovery(top_n=top_n, scan_depth=80).find(seed_ticker)
     return (pg.tickers, json.dumps(pg.names, ensure_ascii=False), pg.sector, pg.industry, pg.source)
 
 
@@ -316,10 +320,23 @@ with tab_scan:
     with col_btn:
         run_discovery = st.button("탐색 시작", type="primary", use_container_width=True)
 
+    disc_method = st.radio(
+        "탐색 방식",
+        options=["업종 분류 기반", "주가 움직임 기반 (K-means)"],
+        index=0,
+        horizontal=True,
+        help=(
+            "**업종 분류 기반**: 네이버 금융 / KRX 업종 코드로 같은 업종 종목 탐색 (빠름)\n\n"
+            "**주가 움직임 기반 (K-means)**: 최근 2년 주가 패턴으로 군집화 "
+            "— 업종이 달라도 실제로 함께 움직이는 종목을 발굴 (최초 실행 30~60초 소요)"
+        ),
+    )
+    disc_method_key = "kmeans" if "K-means" in disc_method else "sector"
+
     st.caption(
-        "🇰🇷 한국: Yahoo Finance 업종 분류 + FDR KRX 시가총액 순위  |  "
+        "🇰🇷 한국: 네이버 금융 업종 분류 + FDR KRX 시가총액 순위  |  "
         "🇺🇸 미국: Yahoo Finance 섹터 분류 + S&P500 구성종목  "
-        "(최초 실행 시 약 10~20초 소요, 이후 24시간 캐시)"
+        "(최초 실행 후 30분 캐시)"
     )
 
     # Resolve Korean name → ticker
@@ -333,14 +350,19 @@ with tab_scan:
             resolved_name = _get_name(seed_ticker)
             st.caption(f"→ **{resolved_name}** ({seed_ticker}) 로 인식됨")
 
-        disc_key = (seed_ticker, peer_top_n)
+        disc_key = (seed_ticker, peer_top_n, disc_method_key)
         if run_discovery or st.session_state.get("last_disc_key") == disc_key:
             st.session_state["last_disc_key"] = disc_key
 
-            with st.spinner(f"'{_get_name(seed_ticker)}' 동종업종 탐색 중… (최초 실행 시 약 10~20초)"):
+            spinner_msg = (
+                f"'{_get_name(seed_ticker)}' 주가 군집 분석 중… (최초 실행 시 약 30~60초)"
+                if disc_method_key == "kmeans"
+                else f"'{_get_name(seed_ticker)}' 동종업종 탐색 중… (최초 실행 시 약 10~20초)"
+            )
+            with st.spinner(spinner_msg):
                 try:
                     tickers_list, names_json, sector, industry, source = _discover_peers(
-                        seed_ticker, peer_top_n
+                        seed_ticker, peer_top_n, disc_method_key
                     )
                     disc_error = None
                 except (ValueError, RuntimeError) as e:

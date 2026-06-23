@@ -204,6 +204,7 @@ class PortfolioManager:
         accum_period: str = "",
         accum_type: str = "",
         accum_value: float = 0.0,
+        accum_currency: str = "KRW",
         sector: str = "",
         notes: str = "",
     ) -> int:
@@ -220,6 +221,7 @@ class PortfolioManager:
                 "accum_period": accum_period,
                 "accum_type": accum_type,
                 "accum_value": accum_value,
+                "accum_currency": accum_currency,
                 "sector": sector,
                 "notes": notes,
                 "created_at": now,
@@ -233,7 +235,7 @@ class PortfolioManager:
         allowed = {
             "ticker", "name", "quantity", "target_qty", "avg_cost",
             "group_type", "accum_period", "accum_type", "accum_value",
-            "sector", "notes",
+            "accum_currency", "sector", "notes",
         }
         fields = {k: v for k, v in kwargs.items() if k in allowed}
         if not fields:

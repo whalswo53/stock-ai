@@ -732,3 +732,241 @@ class PeerDiscovery:
             tickers=tickers,
             names=names,
         )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  K-means peer discovery
+# ══════════════════════════════════════════════════════════════════════════════
+
+class KMeansPeerDiscovery:
+    """
+    Finds peers via K-means clustering on normalized price movements.
+
+    Korean (.KS / .KQ)
+    ──────────────────
+    Universe: KOSPI or KOSDAQ 상위 universe_size개 종목 (시가총액 기준)
+    가격 데이터 batch-download → 정규화(기준=100) → K-means
+
+    US tickers
+    ──────────
+    Universe: S&P500 상위 universe_size개 종목
+    가격 데이터 batch-download → 정규화(기준=100) → K-means
+
+    Optimal K: elbow method (kneedle 방식 — 대각선까지 최대 거리)
+    """
+
+    MIN_COMMON_DAYS = 100
+
+    def __init__(
+        self,
+        top_n: int = 10,
+        universe_size: int = 60,
+        period: str = "2y",
+        max_k: int = 12,
+    ) -> None:
+        self.top_n = top_n
+        self.universe_size = universe_size
+        self.period = period
+        self.max_k = max_k
+
+    @staticmethod
+    def is_korean(ticker: str) -> bool:
+        return ticker.upper().endswith(('.KS', '.KQ'))
+
+    # ── Public ────────────────────────────────────────────────────────────────
+
+    def find(self, ticker: str) -> PeerGroup:
+        ticker = ticker.strip().upper()
+        if self.is_korean(ticker):
+            return self._find_kr(ticker)
+        return self._find_us(ticker)
+
+    # ── Universe builders ──────────────────────────────────────────────────────
+
+    def _build_universe_kr(
+        self, ticker: str
+    ) -> tuple[list[str], dict[str, str]]:
+        suffix = '.KS' if ticker.endswith('.KS') else '.KQ'
+        market_key = 'KOSPI' if suffix == '.KS' else 'KOSDAQ'
+
+        krx = _load_krx_listing()
+        top_df = (
+            krx[krx['Market'].str.upper() == market_key]
+            .sort_values('Marcap', ascending=False)
+            .head(self.universe_size)
+        )
+        code_to_name = dict(zip(top_df['Code'], top_df['Name']))
+        universe = [f"{row['Code']}{suffix}" for _, row in top_df.iterrows()]
+
+        if ticker not in universe:
+            universe = [ticker] + universe[: self.universe_size - 1]
+
+        return universe, code_to_name
+
+    def _build_universe_us(
+        self, ticker: str
+    ) -> tuple[list[str], dict[str, str]]:
+        sp500 = _load_sp500_listing()
+        symbols = sp500['Symbol'].astype(str).tolist()[: self.universe_size]
+        name_map = dict(zip(sp500['Symbol'].astype(str), sp500['Name'].astype(str)))
+
+        if ticker not in symbols:
+            symbols = [ticker] + symbols[: self.universe_size - 1]
+
+        return symbols, name_map
+
+    # ── Price download ─────────────────────────────────────────────────────────
+
+    def _fetch_close(self, tickers: list[str]) -> pd.DataFrame:
+        """Batch-downloads closing prices via yfinance. Returns aligned DataFrame."""
+        import yfinance as yf
+
+        raw = yf.download(
+            tickers,
+            period=self.period,
+            auto_adjust=True,
+            progress=False,
+        )
+
+        if raw.empty:
+            raise ValueError("가격 데이터를 가져올 수 없습니다.")
+
+        if isinstance(raw.columns, pd.MultiIndex):
+            close = raw['Close']
+        elif 'Close' in raw.columns:
+            close = raw[['Close']]
+            close.columns = pd.Index(tickers[:1])
+        else:
+            raise ValueError("yfinance 응답에서 Close 컬럼을 찾을 수 없습니다.")
+
+        # Drop columns with insufficient data, then align dates
+        close = close.loc[:, close.notna().sum() >= self.MIN_COMMON_DAYS]
+        close = close.dropna(how='any')
+
+        if close.shape[0] < self.MIN_COMMON_DAYS or close.shape[1] < 2:
+            raise ValueError(
+                f"공통 거래일이 부족합니다 ({close.shape[0]}일). "
+                "기간을 줄이거나 universe_size를 낮춰보세요."
+            )
+
+        return close
+
+    # ── Clustering ────────────────────────────────────────────────────────────
+
+    def _optimal_k(self, X: np.ndarray) -> int:
+        """Elbow method (kneedle): K with maximum perpendicular distance to diagonal."""
+        from sklearn.cluster import KMeans
+
+        n = X.shape[0]
+        max_k = min(self.max_k, n - 1)
+        if max_k < 2:
+            return 2
+
+        k_range = list(range(2, max_k + 1))
+        inertias = [
+            KMeans(n_clusters=k, random_state=42, n_init=10).fit(X).inertia_
+            for k in k_range
+        ]
+
+        if len(inertias) < 2:
+            return k_range[0]
+
+        # Normalize inertia to [0, 1] (0 = first, 1 = last)
+        span = inertias[0] - inertias[-1]
+        if span <= 0:
+            return k_range[0]
+
+        x = np.linspace(0.0, 1.0, len(k_range))
+        y_norm = (inertias[0] - np.array(inertias)) / span  # increasing, 0→1
+
+        # Max perpendicular distance from y=x diagonal → elbow
+        return k_range[int(np.argmax(np.abs(y_norm - x)))]
+
+    def _cluster(
+        self, close: pd.DataFrame, seed_ticker: str
+    ) -> tuple[list[str], int, int]:
+        """Normalizes prices, clusters, returns (peer_tickers, opt_k, cluster_size)."""
+        from sklearn.cluster import KMeans
+
+        if seed_ticker not in close.columns:
+            raise ValueError(f"'{seed_ticker}' 가격 데이터를 가져올 수 없습니다.")
+
+        # Normalize: each stock starts at 100
+        X = ((close / close.iloc[0]) * 100.0).values.T  # (n_stocks, n_days)
+        tickers_list = list(close.columns)
+
+        opt_k = self._optimal_k(X)
+        labels = KMeans(n_clusters=opt_k, random_state=42, n_init=10).fit_predict(X)
+
+        seed_label = labels[tickers_list.index(seed_ticker)]
+        peers = [tickers_list[i] for i, lbl in enumerate(labels) if lbl == seed_label]
+
+        return peers, opt_k, len(peers)
+
+    # ── Market-specific finders ────────────────────────────────────────────────
+
+    def _find_kr(self, ticker: str) -> PeerGroup:
+        suffix = '.KS' if ticker.endswith('.KS') else '.KQ'
+        market_str = 'KOSPI' if suffix == '.KS' else 'KOSDAQ'
+
+        universe, code_to_name = self._build_universe_kr(ticker)
+        close = self._fetch_close(universe)
+
+        peers, opt_k, cluster_size = self._cluster(close, ticker)
+
+        # Rank cluster members by market cap
+        krx = _load_krx_listing()
+        code_to_marcap = dict(zip(krx['Code'], krx['Marcap']))
+        peers.sort(key=lambda t: code_to_marcap.get(t[:-3], 0), reverse=True)
+
+        if ticker in peers:
+            peers = [ticker] + [t for t in peers if t != ticker]
+        else:
+            peers = [ticker] + peers
+
+        peers = peers[: self.top_n]
+        names = {t: code_to_name.get(t[:-3], t) for t in peers}
+
+        return PeerGroup(
+            seed_ticker=ticker,
+            sector="K-means 클러스터",
+            industry=(
+                f"클러스터 크기 {cluster_size}개 "
+                f"(K={opt_k}, universe {len(close.columns)}개)"
+            ),
+            source=(
+                f"K-means 클러스터링 · 주가 움직임 기반 · "
+                f"{market_str} 상위 {self.universe_size}개 종목 대상"
+            ),
+            tickers=peers,
+            names=names,
+        )
+
+    def _find_us(self, ticker: str) -> PeerGroup:
+        universe, name_map = self._build_universe_us(ticker)
+        close = self._fetch_close(universe)
+
+        peers, opt_k, cluster_size = self._cluster(close, ticker)
+
+        if ticker in peers:
+            peers = [ticker] + [t for t in peers if t != ticker]
+        else:
+            peers = [ticker] + peers
+
+        peers = peers[: self.top_n]
+        names = {t: name_map.get(t, t) for t in peers}
+
+        return PeerGroup(
+            seed_ticker=ticker,
+            sector="K-means 클러스터",
+            industry=(
+                f"클러스터 크기 {cluster_size}개 "
+                f"(K={opt_k}, universe {len(close.columns)}개)"
+            ),
+            source=(
+                f"K-means 클러스터링 · 주가 움직임 기반 · "
+                f"S&P500 상위 {self.universe_size}개 종목 대상"
+            ),
+            tickers=peers,
+            names=names,
+        )

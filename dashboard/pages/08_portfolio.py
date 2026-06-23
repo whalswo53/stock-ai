@@ -42,6 +42,7 @@ ACCUM_PERIOD_LABEL = {"daily": "매일", "weekly": "매주", "monthly": "매월"
 ACCUM_PERIOD_VAL   = {"매일": "daily", "매주": "weekly", "매월": "monthly"}
 ACCUM_TYPE_LABEL   = {"amount": "금액 기준", "quantity": "수량 기준"}
 ACCUM_TYPE_VAL     = {"금액 기준": "amount", "수량 기준": "quantity"}
+CURRENCY_SYMBOL    = {"KRW": "₩", "USD": "$"}
 
 UP   = "#26a69a"
 DOWN = "#ef5350"
@@ -64,7 +65,9 @@ def _plan_summary(h: dict) -> str:
     if not period or not val:
         return ""
     if typ == "amount":
-        return f"{period} ₩{val:,.0f}씩 적립"
+        currency = h.get("accum_currency") or "KRW"
+        sym = CURRENCY_SYMBOL.get(currency, "₩")
+        return f"{period} {sym}{val:,.0f}씩 적립"
     if typ == "quantity":
         return f"{period} {val:,.0f}주씩 적립"
     return ""
@@ -193,13 +196,20 @@ with st.sidebar:
             key="add_group_sel",
         )
 
-        _period = "매주"
-        _type   = "금액 기준"
+        _period   = "매주"
+        _type     = "금액 기준"
+        _currency = "KRW"
         if group_sel == GROUP_ACCUMULATING:
             st.caption("**적립 계획 (선택)**")
             col_p, col_t = st.columns(2)
             _period = col_p.radio("적립 주기", ["매일", "매주", "매월"], horizontal=True, key="add_period")
             _type   = col_t.radio("적립 방식", ["금액 기준", "수량 기준"], horizontal=True, key="add_type")
+            if _type == "금액 기준":
+                _cur_raw  = st.radio(
+                    "통화", ["KRW (원)", "USD (달러)"],
+                    horizontal=True, key="add_currency",
+                )
+                _currency = "KRW" if "KRW" in _cur_raw else "USD"
 
         with st.form("add_holding", clear_on_submit=True):
             raw_input = st.text_input(
@@ -215,19 +225,24 @@ with st.sidebar:
                 target_qty_input: float | None = st.number_input(
                     "목표 수량 (선택)", min_value=0.0, step=1.0, value=0.0
                 ) or None
-                _accum_placeholder = "예: 100000 (원)" if _type == "금액 기준" else "예: 2 (주)"
-                accum_value_str = st.text_input("적립 금액/수량", placeholder=_accum_placeholder)
+                if _type == "금액 기준":
+                    _ph = "예: 100,000 (원)" if _currency == "KRW" else "예: 100 (달러)"
+                else:
+                    _ph = "예: 2 (주)"
+                accum_value_str = st.text_input("적립 금액/수량", placeholder=_ph)
                 try:
                     accum_value_input = float(accum_value_str.strip()) if accum_value_str.strip() else 0.0
                 except ValueError:
                     accum_value_input = 0.0
-                accum_period_input = ACCUM_PERIOD_VAL[_period]
-                accum_type_input   = ACCUM_TYPE_VAL[_type]
+                accum_period_input   = ACCUM_PERIOD_VAL[_period]
+                accum_type_input     = ACCUM_TYPE_VAL[_type]
+                accum_currency_input = _currency if _type == "금액 기준" else "KRW"
             else:
-                target_qty_input   = None
-                accum_period_input = ""
-                accum_type_input   = ""
-                accum_value_input  = 0.0
+                target_qty_input     = None
+                accum_period_input   = ""
+                accum_type_input     = ""
+                accum_value_input    = 0.0
+                accum_currency_input = "KRW"
 
             notes_input = st.text_input("메모 (선택)", placeholder="예: 장기 보유")
             submitted   = st.form_submit_button("추가하기", type="primary", use_container_width=True)
@@ -268,6 +283,7 @@ with st.sidebar:
                             accum_period=accum_period_input,
                             accum_type=accum_type_input,
                             accum_value=accum_value_input,
+                            accum_currency=accum_currency_input,
                             notes=notes_input,
                         )
                         st.cache_data.clear()
@@ -644,13 +660,24 @@ with tab_acc:
                                 step=10000.0 if "금액" in new_typ else 1.0,
                                 key=f"sev_{hid}"
                             )
+                            if new_typ == "금액 기준":
+                                _cur_c = h_data.get("accum_currency") or ("KRW" if is_kr(ticker) else "USD")
+                                _new_c_raw = st.radio(
+                                    "통화", ["KRW (원)", "USD (달러)"],
+                                    index=0 if _cur_c == "KRW" else 1,
+                                    horizontal=True, key=f"sec_{hid}",
+                                )
+                                _save_currency = "KRW" if "KRW" in _new_c_raw else "USD"
+                            else:
+                                _save_currency = "KRW"
                             _save_period = ACCUM_PERIOD_VAL[new_per]
                             _save_type   = ACCUM_TYPE_VAL[new_typ]
                             _save_val    = new_val
                         else:
-                            _save_period = ""
-                            _save_type   = ""
-                            _save_val    = 0.0
+                            _save_period   = ""
+                            _save_type     = ""
+                            _save_val      = 0.0
+                            _save_currency = "KRW"
 
                         new_note = st.text_input("메모", value=h_data.get("notes", ""), key=f"sen_{hid}")
                         if st.form_submit_button("저장", type="primary"):
@@ -663,6 +690,7 @@ with tab_acc:
                                 accum_period=_save_period,
                                 accum_type=_save_type,
                                 accum_value=_save_val,
+                                accum_currency=_save_currency,
                                 notes=new_note,
                             )
                             st.cache_data.clear()
@@ -761,6 +789,16 @@ with tab_hld:
                                 step=10000.0 if "금액" in new_typ else 1.0,
                                 key=f"hev_{hid}"
                             )
+                            if new_typ == "금액 기준":
+                                _def_c = "KRW" if is_kr(ticker) else "USD"
+                                _new_hc_raw = st.radio(
+                                    "통화", ["KRW (원)", "USD (달러)"],
+                                    index=0 if _def_c == "KRW" else 1,
+                                    horizontal=True, key=f"hec2_{hid}",
+                                )
+                                _sc = "KRW" if "KRW" in _new_hc_raw else "USD"
+                            else:
+                                _sc = "KRW"
                             new_tgt: float | None = st.number_input(
                                 "목표 수량", min_value=0.0, key=f"hetq_{hid}"
                             ) or None
@@ -771,6 +809,7 @@ with tab_hld:
                             new_tgt = None
                             _sp = ""
                             _st_val = ""
+                            _sc = "KRW"
 
                         new_note = st.text_input(
                             "메모", value=h_data.get("notes", ""), key=f"hen_{hid}"
@@ -784,6 +823,7 @@ with tab_hld:
                                 accum_period=_sp,
                                 accum_type=_st_val,
                                 accum_value=new_val,
+                                accum_currency=_sc,
                                 target_qty=new_tgt,
                                 notes=new_note,
                             )
