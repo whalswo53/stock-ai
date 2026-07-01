@@ -800,24 +800,24 @@ class PeerDiscovery:
 
 class KMeansPeerDiscovery:
     """
-    Finds peers via K-means clustering on normalized price movements.
+    Finds peers via K-means clustering on normalized price movements,
+    across a single global candidate pool — no country/exchange split.
 
-    Korean (.KS / .KQ)
-    ──────────────────
-    Universe: KOSPI or KOSDAQ 상위 universe_size개 종목 (시가총액 기준)
-    가격 데이터 batch-download → 정규화(기준=100) → K-means
+    Global pool (universe)
+    ───────────────────────
+    KOSPI 상위 universe_size개 + KOSDAQ 상위 universe_size개
+    + S&P500 상위 universe_size개 + INDUSTRY_GROUPS 등록 해외 종목
+      (홍콩/중국/대만 등, 예: SMIC = 0981.HK)
+    을 하나의 후보 풀로 합쳐서 사용합니다. 반도체처럼 국가 구분 없는
+    글로벌 공급망 섹터는 이렇게 봐야 실제 피어를 놓치지 않습니다.
 
-    US tickers
-    ──────────
-    Universe: S&P500 상위 universe_size개 종목
-    가격 데이터 batch-download → 정규화(기준=100) → K-means
+    통화 정규화
+    ────────────
+    원화(.KS/.KQ) 종목은 일별 KRW=X(USD/KRW) 환율로 USD 환산한 뒤
+    시작가=100 정규화를 적용합니다. 국가 간 가격 단위 차이가 아니라
+    순수한 "움직임 패턴"만으로 비교하기 위함입니다.
 
     Optimal K: elbow method (kneedle 방식 — 대각선까지 최대 거리)
-
-    기타 해외 거래소 (.HK/.SS/.SZ/.T 등, 예: SMIC = 0981.HK)
-    ─────────────────────────────────────────────────────────
-    yfinance batch-download 기반 universe(KR/S&P500)에 속하지 않으므로
-    K-means 대신 INDUSTRY_GROUPS 정적 종목군으로 폴백합니다.
     """
 
     MIN_COMMON_DAYS = 100
@@ -825,7 +825,7 @@ class KMeansPeerDiscovery:
     def __init__(
         self,
         top_n: int = 10,
-        universe_size: int = 60,
+        universe_size: int = 40,
         period: str = "2y",
         max_k: int = 12,
     ) -> None:
@@ -834,64 +834,94 @@ class KMeansPeerDiscovery:
         self.period = period
         self.max_k = max_k
 
-    @staticmethod
-    def is_korean(ticker: str) -> bool:
-        return ticker.upper().endswith(('.KS', '.KQ'))
-
     # ── Public ────────────────────────────────────────────────────────────────
 
     def find(self, ticker: str) -> PeerGroup:
         ticker = ticker.strip().upper()
-        if self.is_korean(ticker):
-            return self._find_kr(ticker)
-        if _is_other_market(ticker):
-            return _static_group_peers(
-                ticker, self.top_n, source_suffix=" (K-means 클러스터링 미적용)"
-            )
-        return self._find_us(ticker)
+        try:
+            return self._find_global(ticker)
+        except Exception as primary_err:
+            # Last-resort safety net: seed has no fetchable yfinance history
+            # (e.g. delisted or unsupported ticker) — fall back to the
+            # curated static group if the seed happens to be registered there.
+            try:
+                return _static_group_peers(
+                    ticker, self.top_n,
+                    source_suffix=" (글로벌 K-means 풀 조회 실패 → 정적 폴백)",
+                )
+            except Exception:
+                raise primary_err
 
-    # ── Universe builders ──────────────────────────────────────────────────────
+    # ── Universe builder ─────────────────────────────────────────────────────
 
-    def _build_universe_kr(
+    def _build_universe_global(
         self, ticker: str
     ) -> tuple[list[str], dict[str, str]]:
-        suffix = '.KS' if ticker.endswith('.KS') else '.KQ'
-        market_key = 'KOSPI' if suffix == '.KS' else 'KOSDAQ'
+        """Combines KOSPI/KOSDAQ + S&P500 + INDUSTRY_GROUPS overseas tickers
+        into one candidate pool, regardless of the seed ticker's own market."""
+        pool: list[str] = []
+        names: dict[str, str] = {}
 
         krx = _load_krx_listing()
-        top_df = (
-            krx[krx['Market'].str.upper() == market_key]
-            .sort_values('Marcap', ascending=False)
-            .head(self.universe_size)
-        )
-        code_to_name = dict(zip(top_df['Code'], top_df['Name']))
-        universe = [f"{row['Code']}{suffix}" for _, row in top_df.iterrows()]
+        for market_key, suffix in (('KOSPI', '.KS'), ('KOSDAQ', '.KQ')):
+            top_df = (
+                krx[krx['Market'].str.upper() == market_key]
+                .sort_values('Marcap', ascending=False)
+                .head(self.universe_size)
+            )
+            for _, row in top_df.iterrows():
+                t = f"{row['Code']}{suffix}"
+                pool.append(t)
+                names[t] = row['Name']
 
-        if ticker not in universe:
-            universe = [ticker] + universe[: self.universe_size - 1]
-
-        return universe, code_to_name
-
-    def _build_universe_us(
-        self, ticker: str
-    ) -> tuple[list[str], dict[str, str]]:
         sp500 = _load_sp500_listing()
-        symbols = sp500['Symbol'].astype(str).tolist()[: self.universe_size]
-        name_map = dict(zip(sp500['Symbol'].astype(str), sp500['Name'].astype(str)))
+        for _, row in sp500.head(self.universe_size).iterrows():
+            t = str(row['Symbol'])
+            pool.append(t)
+            names[t] = str(row['Name'])
 
-        if ticker not in symbols:
-            symbols = [ticker] + symbols[: self.universe_size - 1]
+        for gdata in INDUSTRY_GROUPS.values():
+            for t, n in gdata.get('names', {}).items():
+                if t not in names:
+                    pool.append(t)
+                    names[t] = n
 
-        return symbols, name_map
+        universe = list(dict.fromkeys(pool))  # de-dup, keep first occurrence order
+        if ticker not in universe:
+            universe.append(ticker)
+        names.setdefault(ticker, ticker)
+
+        return universe, names
+
+    # ── Seed classification (display only — clustering itself is pool-wide) ──
+
+    def _seed_info(self, ticker: str) -> tuple[str, str, str]:
+        import yfinance as yf
+
+        try:
+            info = yf.Ticker(ticker).info
+            sector = info.get('sector', '') or ''
+            industry = info.get('industry', '') or ''
+            name = info.get('shortName') or info.get('longName') or ticker
+            return sector, industry, name
+        except Exception:
+            return '', '', ticker
 
     # ── Price download ─────────────────────────────────────────────────────────
 
     def _fetch_close(self, tickers: list[str]) -> pd.DataFrame:
-        """Batch-downloads closing prices via yfinance. Returns aligned DataFrame."""
+        """Batch-downloads closing prices via yfinance. KRW-denominated
+        (.KS/.KQ) tickers are converted to USD using daily KRW=X history so
+        that movement patterns are compared on a common currency basis
+        before start=100 normalization.
+        """
         import yfinance as yf
 
+        kr_tickers = [t for t in tickers if t.endswith(('.KS', '.KQ'))]
+        dl_tickers = list(tickers) + (['KRW=X'] if kr_tickers else [])
+
         raw = yf.download(
-            tickers,
+            dl_tickers,
             period=self.period,
             auto_adjust=True,
             progress=False,
@@ -901,12 +931,19 @@ class KMeansPeerDiscovery:
             raise ValueError("가격 데이터를 가져올 수 없습니다.")
 
         if isinstance(raw.columns, pd.MultiIndex):
-            close = raw['Close']
+            close = raw['Close'].copy()
         elif 'Close' in raw.columns:
             close = raw[['Close']]
-            close.columns = pd.Index(tickers[:1])
+            close.columns = pd.Index(dl_tickers[:1])
         else:
             raise ValueError("yfinance 응답에서 Close 컬럼을 찾을 수 없습니다.")
+
+        if kr_tickers and 'KRW=X' in close.columns:
+            fx = close['KRW=X'].ffill()
+            for t in kr_tickers:
+                if t in close.columns:
+                    close[t] = close[t] / fx
+            close = close.drop(columns=['KRW=X'])
 
         # Drop columns with insufficient data, then align dates
         close = close.loc[:, close.notna().sum() >= self.MIN_COMMON_DAYS]
@@ -972,51 +1009,19 @@ class KMeansPeerDiscovery:
 
         return peers, opt_k, len(peers)
 
-    # ── Market-specific finders ────────────────────────────────────────────────
+    # ── Global finder ───────────────────────────────────────────────────────────
 
-    def _find_kr(self, ticker: str) -> PeerGroup:
-        suffix = '.KS' if ticker.endswith('.KS') else '.KQ'
-        market_str = 'KOSPI' if suffix == '.KS' else 'KOSDAQ'
+    def _find_global(self, ticker: str) -> PeerGroup:
+        seed_sector, seed_industry, _seed_name = self._seed_info(ticker)
 
-        universe, code_to_name = self._build_universe_kr(ticker)
+        universe, name_map = self._build_universe_global(ticker)
         close = self._fetch_close(universe)
 
         peers, opt_k, cluster_size = self._cluster(close, ticker)
 
-        # Rank cluster members by market cap
-        krx = _load_krx_listing()
-        code_to_marcap = dict(zip(krx['Code'], krx['Marcap']))
-        peers.sort(key=lambda t: code_to_marcap.get(t[:-3], 0), reverse=True)
-
-        if ticker in peers:
-            peers = [ticker] + [t for t in peers if t != ticker]
-        else:
-            peers = [ticker] + peers
-
-        peers = peers[: self.top_n]
-        names = {t: code_to_name.get(t[:-3], t) for t in peers}
-
-        return PeerGroup(
-            seed_ticker=ticker,
-            sector="K-means 클러스터",
-            industry=(
-                f"클러스터 크기 {cluster_size}개 "
-                f"(K={opt_k}, universe {len(close.columns)}개)"
-            ),
-            source=(
-                f"K-means 클러스터링 · 주가 움직임 기반 · "
-                f"{market_str} 상위 {self.universe_size}개 종목 대상"
-            ),
-            tickers=peers,
-            names=names,
-        )
-
-    def _find_us(self, ticker: str) -> PeerGroup:
-        universe, name_map = self._build_universe_us(ticker)
-        close = self._fetch_close(universe)
-
-        peers, opt_k, cluster_size = self._cluster(close, ticker)
-
+        # Preserve pool order (KOSPI → KOSDAQ → S&P500 → 해외, each already
+        # ranked within its own source); cross-market marcap isn't a
+        # comparable unit, so no re-sort — just pin the seed first.
         if ticker in peers:
             peers = [ticker] + [t for t in peers if t != ticker]
         else:
@@ -1027,14 +1032,18 @@ class KMeansPeerDiscovery:
 
         return PeerGroup(
             seed_ticker=ticker,
-            sector="K-means 클러스터",
+            sector=seed_sector or "K-means 클러스터",
             industry=(
+                seed_industry + " · " if seed_industry else ""
+            ) + (
                 f"클러스터 크기 {cluster_size}개 "
-                f"(K={opt_k}, universe {len(close.columns)}개)"
+                f"(K={opt_k}, 글로벌 universe {len(close.columns)}개)"
             ),
             source=(
-                f"K-means 클러스터링 · 주가 움직임 기반 · "
-                f"S&P500 상위 {self.universe_size}개 종목 대상"
+                "K-means 클러스터링 · 글로벌 통합 풀 (국가/거래소 구분 없음) · "
+                f"KOSPI/KOSDAQ 상위 {self.universe_size}개 + "
+                f"S&P500 상위 {self.universe_size}개 + INDUSTRY_GROUPS 해외 종목 · "
+                "원화 종목은 일별 환율로 USD 환산 후 정규화"
             ),
             tickers=peers,
             names=names,

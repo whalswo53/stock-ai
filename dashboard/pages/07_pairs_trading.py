@@ -329,16 +329,25 @@ with tab_scan:
         help=(
             "**업종 분류 기반**: 네이버 금융 / KRX 업종 코드로 같은 업종 종목 탐색 (빠름)\n\n"
             "**주가 움직임 기반 (K-means)**: 최근 2년 주가 패턴으로 군집화 "
-            "— 업종이 달라도 실제로 함께 움직이는 종목을 발굴 (최초 실행 30~60초 소요)"
+            "— KOSPI/KOSDAQ + S&P500 + 홍콩/중국/대만 종목을 국가 구분 없이 "
+            "하나의 글로벌 풀로 합쳐 군집화 (최초 실행 60~90초 소요)"
         ),
     )
     disc_method_key = "kmeans" if "K-means" in disc_method else "sector"
 
-    st.caption(
-        "🇰🇷 한국: 네이버 금융 업종 분류 + FDR KRX 시가총액 순위  |  "
-        "🇺🇸 미국: Yahoo Finance 섹터 분류 + S&P500 구성종목  "
-        "(최초 실행 후 30분 캐시)"
-    )
+    if disc_method_key == "kmeans":
+        st.caption(
+            "🌐 **글로벌 통합 풀에서 탐색 중** — KOSPI/KOSDAQ + S&P500 + "
+            "INDUSTRY_GROUPS 홍콩/중국/대만 종목을 국가·거래소 구분 없이 "
+            "하나의 풀로 합쳐 K-means 클러스터링 (원화 종목은 일별 환율로 USD 환산 후 비교, "
+            "최초 실행 후 30분 캐시)"
+        )
+    else:
+        st.caption(
+            "🇰🇷 한국: 네이버 금융 업종 분류 + FDR KRX 시가총액 순위  |  "
+            "🇺🇸 미국: Yahoo Finance 섹터 분류 + S&P500 구성종목  "
+            "(최초 실행 후 30분 캐시)"
+        )
 
     # Resolve Korean name → ticker
     seed_ticker, seed_err = _resolve_ticker(seed_input)
@@ -356,7 +365,7 @@ with tab_scan:
             st.session_state["last_disc_key"] = disc_key
 
             spinner_msg = (
-                f"'{_get_name(seed_ticker)}' 주가 군집 분석 중… (최초 실행 시 약 30~60초)"
+                f"'{_get_name(seed_ticker)}' 글로벌 통합 풀에서 주가 군집 분석 중… (최초 실행 시 약 60~90초)"
                 if disc_method_key == "kmeans"
                 else f"'{_get_name(seed_ticker)}' 동종업종 탐색 중… (최초 실행 시 약 10~20초)"
             )
