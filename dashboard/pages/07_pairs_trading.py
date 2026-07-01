@@ -41,6 +41,17 @@ PRESET_DIRECT_IDX = list(PRESET_PAIRS.keys()).index(PRESET_DIRECT)
 
 PERIOD_OPTIONS = {"6개월": "6mo", "1년": "1y", "2년": "2y"}
 
+ALPHA_LABELS = ["5% (엄격)", "10% (완화)"]
+ALPHA_SESSION_KEY = "pt_alpha"
+
+
+def _alpha_default_idx() -> int:
+    return 1 if st.session_state.get(ALPHA_SESSION_KEY, 0.05) >= 0.10 else 0
+
+
+def _alpha_from_label(label: str) -> float:
+    return 0.05 if label.startswith("5%") else 0.10
+
 # ── Ticker display name lookup ─────────────────────────────────────────────────
 _NAME_LOOKUP: dict[str, str] = dict(TICKER_KR_NAME)
 for _grp in INDUSTRY_GROUPS.values():
@@ -201,16 +212,18 @@ with st.sidebar:
     period        = PERIOD_OPTIONS[period_label]
 
     st.divider()
-    st.subheader("공적분 검정 (자동 스캔)")
+    st.subheader("공적분 검정 유의수준")
     alpha_label   = st.radio(
-        "유의수준", ["5% (엄격)", "10% (완화)"], index=0, horizontal=True,
+        "유의수준", ALPHA_LABELS, index=_alpha_default_idx(), horizontal=True,
+        key="alpha_radio_sidebar",
         help=(
-            "Engle-Granger 공적분 검정의 p-value 임계값입니다. "
-            "5%는 통계적으로 더 엄격하고, 10%는 후보 쌍을 더 많이 통과시킵니다 "
-            "(자동 스캔 탭에만 적용, 직접 분석 탭은 5% 고정)."
+            "Engle-Granger 공적분 검정(자동 스캔) / 공적분·ADF 검정(직접 분석)의 "
+            "p-value 임계값입니다. 5%는 통계적으로 더 엄격하고, 10%는 후보를 더 많이 "
+            "통과시킵니다. 직접 분석 탭에서도 동일하게 조정할 수 있습니다."
         ),
     )
-    alpha = 0.05 if alpha_label.startswith("5%") else 0.10
+    alpha = _alpha_from_label(alpha_label)
+    st.session_state[ALPHA_SESSION_KEY] = alpha
 
     st.divider()
     st.subheader("신호 임계값")
@@ -283,16 +296,17 @@ def _run_dynamic_scan(
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def _run_pair(ta, tb, period, window, ez, xz, delta) -> AggregatedPairResult:
+def _run_pair(ta, tb, period, window, ez, xz, delta, alpha=0.05) -> AggregatedPairResult:
     return QuantAggregator(
         period=period, zscore_window=window, entry_z=ez, exit_z=xz, kalman_delta=delta,
+        alpha=alpha,
     ).run_pair(ta, tb)
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def _run_single(ticker, period, window, ez, xz) -> MeanReversionResult:
+def _run_single(ticker, period, window, ez, xz, alpha=0.05) -> MeanReversionResult:
     return QuantAggregator(
-        period=period, zscore_window=window, entry_z=ez, exit_z=xz
+        period=period, zscore_window=window, entry_z=ez, exit_z=xz, alpha=alpha,
     ).run_single(ticker)
 
 
@@ -441,6 +455,17 @@ with tab_direct:
 
     mode = st.radio("분석 모드", ["페어 분석", "단일 종목 평균회귀"], horizontal=True)
 
+    direct_alpha_label = st.radio(
+        "유의수준 (공적분 / ADF 검정)", ALPHA_LABELS, index=_alpha_default_idx(),
+        horizontal=True, key="alpha_radio_direct",
+        help=(
+            "자동 스캔 탭 사이드바의 유의수준 설정과 연동됩니다. "
+            "여기서 바꾸면 자동 스캔 탭에도 반영됩니다."
+        ),
+    )
+    direct_alpha = _alpha_from_label(direct_alpha_label)
+    st.session_state[ALPHA_SESSION_KEY] = direct_alpha
+
     # ── Ticker inputs ─────────────────────────────────────────────────────────
     if mode == "페어 분석":
         prefill = st.session_state.get("scan_prefill", {})
@@ -529,7 +554,8 @@ with tab_direct:
         with st.spinner(f"'{label_a}' & '{label_b}' 앙상블 분석 중…"):
             try:
                 result: AggregatedPairResult = _run_pair(
-                    ticker_a, ticker_b, period, zscore_window, entry_z, exit_z, kalman_delta
+                    ticker_a, ticker_b, period, zscore_window, entry_z, exit_z, kalman_delta,
+                    direct_alpha,
                 )
                 error_msg = None
             except ValueError as e:
@@ -550,18 +576,20 @@ with tab_direct:
                 "두 종목 가격이 **장기적으로 같은 방향으로 움직이는 통계적 관계**를 말합니다.  \n"
                 "공적분이 있으면 가격 차이(스프레드)가 일정 범위를 벗어나도 결국 평균으로 "
                 "돌아오는 경향이 있어, 이를 이용한 **페어 트레이딩 전략의 기초**가 됩니다.  \n\n"
-                "**p-value**: 0.05 미만이면 5% 유의수준에서 공적분을 인정합니다.  \n"
+                f"**p-value**: {direct_alpha:.2f} 미만이면 {direct_alpha*100:.0f}% 유의수준에서 "
+                "공적분을 인정합니다.  \n"
                 "**검정 통계량**: 임계값보다 더 작은 음수일수록 공적분 관계가 강합니다."
             )
 
+        alpha_pct_key = "10%" if direct_alpha >= 0.10 else "5%"
         c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
         coint_ok = coint.is_cointegrated
         c1.metric("검정 결과", "공적분 있음 ✅" if coint_ok else "공적분 없음 ❌")
         c2.metric("p-value", f"{coint.pvalue:.4f}",
-                  help="낮을수록 공적분 관계가 강합니다. 0.05 미만 = 통계적으로 유의")
+                  help=f"낮을수록 공적분 관계가 강합니다. {direct_alpha:.2f} 미만 = 통계적으로 유의")
         c3.metric("검정 통계량", f"{coint.test_stat:.3f}",
                   help="임계값보다 더 작은 음수일수록 공적분이 강합니다")
-        c4.metric("임계값 (5%)", f"{coint.critical_values['5%']:.3f}",
+        c4.metric(f"임계값 ({alpha_pct_key})", f"{coint.critical_values[alpha_pct_key]:.3f}",
                   help="검정 통계량이 이 값보다 작으면 공적분이 성립합니다")
         st.caption(f"종목쌍: **{label_a}** vs **{label_b}**")
 
@@ -798,7 +826,7 @@ with tab_direct:
         with st.spinner(f"'{single_label}' 평균회귀 분석 중…"):
             try:
                 mr: MeanReversionResult = _run_single(
-                    single_ticker, period, zscore_window, entry_z, exit_z
+                    single_ticker, period, zscore_window, entry_z, exit_z, direct_alpha
                 )
                 error_msg = None
             except ValueError as e:
@@ -823,7 +851,7 @@ with tab_direct:
         mr_ok = mr.is_mean_reverting
         c1.metric("검정 결과", "평균회귀 가능 ✅" if mr_ok else "단위근 존재 ❌")
         c2.metric("ADF p-value", f"{mr.adf_pvalue:.4f}",
-                  help="낮을수록 평균회귀 성질이 강합니다. 0.05 미만 = 통계적으로 유의")
+                  help=f"낮을수록 평균회귀 성질이 강합니다. {direct_alpha:.2f} 미만 = 통계적으로 유의")
         hl = mr.half_life_days
         c3.metric(
             "OU 반감기",

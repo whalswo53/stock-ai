@@ -29,7 +29,7 @@ class CointegrationResult:
     ticker_a: str
     ticker_b: str
     pvalue: float
-    is_cointegrated: bool          # pvalue < 0.05
+    is_cointegrated: bool          # pvalue < alpha
     test_stat: float
     critical_values: dict[str, float] = field(default_factory=dict)
 
@@ -63,6 +63,7 @@ class PairsTrading:
     Thresholds (configurable):
         entry_z  = 2.0  — open position when |Z| crosses this
         exit_z   = 0.5  — close position when |Z| falls below this
+        alpha    = 0.05 — cointegration significance level (p-value cutoff)
     """
 
     def __init__(
@@ -71,12 +72,14 @@ class PairsTrading:
         zscore_window: int = 30,
         entry_z: float = 2.0,
         exit_z: float = 0.5,
+        alpha: float = 0.05,
     ) -> None:
         self._collector = PriceCollector()
         self.period = period
         self.zscore_window = zscore_window
         self.entry_z = entry_z
         self.exit_z = exit_z
+        self.alpha = alpha
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -114,7 +117,7 @@ class PairsTrading:
             ticker_a=str(price_a.name),
             ticker_b=str(price_b.name),
             pvalue=float(pvalue),
-            is_cointegrated=pvalue < 0.05,
+            is_cointegrated=pvalue < self.alpha,
             test_stat=float(stat),
             critical_values={
                 "1%": float(crit[0]),

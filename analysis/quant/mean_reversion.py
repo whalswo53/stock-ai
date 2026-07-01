@@ -31,7 +31,7 @@ class MeanReversionResult:
     zscore: pd.Series
     zscore_window: int
     adf_pvalue: float
-    is_mean_reverting: bool    # adf_pvalue < 0.05
+    is_mean_reverting: bool    # adf_pvalue < alpha
     half_life_days: float      # OU half-life; inf if not mean-reverting
     zscore_latest: float
     signal: str                # BUY / SELL / CLOSE / WAIT
@@ -57,12 +57,14 @@ class MeanReversionAnalyzer:
         zscore_window: int = 30,
         entry_z: float = 2.0,
         exit_z: float = 0.5,
+        alpha: float = 0.05,
     ) -> None:
         self._collector = PriceCollector()
         self.period = period
         self.zscore_window = zscore_window
         self.entry_z = entry_z
         self.exit_z = exit_z
+        self.alpha = alpha
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -85,7 +87,7 @@ class MeanReversionAnalyzer:
 
         # ADF test on price level
         adf_stat, adf_pvalue, *_ = adfuller(price.values, autolag="AIC")
-        is_mr = bool(adf_pvalue < 0.05)
+        is_mr = bool(adf_pvalue < self.alpha)
 
         # OU half-life via lag-1 regression: Δy = α + β·y_{t-1} + ε
         y = price.values

@@ -71,6 +71,7 @@ class QuantAggregator:
         entry_z: float = 2.0,
         exit_z: float = 0.5,
         kalman_delta: float = 1e-4,
+        alpha: float = 0.05,
     ) -> None:
         self.entry_z = entry_z
         self.exit_z  = exit_z
@@ -80,6 +81,7 @@ class QuantAggregator:
             zscore_window=zscore_window,
             entry_z=entry_z,
             exit_z=exit_z,
+            alpha=alpha,
         )
         self._kalman = KalmanHedge(
             period=period,
@@ -93,6 +95,7 @@ class QuantAggregator:
             zscore_window=zscore_window,
             entry_z=entry_z,
             exit_z=exit_z,
+            alpha=alpha,
         )
 
     # ── Public API ────────────────────────────────────────────────────────
