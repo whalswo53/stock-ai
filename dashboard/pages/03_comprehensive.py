@@ -1,6 +1,6 @@
 """
 종합 분석 페이지.
-기술적 분석 · 뉴스/센티먼트 · 페어 상대강도 · 시장 분위기를 한 화면에서 확인하고
+기술적 분석 · 뉴스/센티먼트 · 페어 트레이딩 신호 · 시장 분위기를 한 화면에서 확인하고
 통합 AI 프롬프트를 생성한다.
 """
 from __future__ import annotations
@@ -47,7 +47,7 @@ with st.sidebar:
     st.caption(
         "⬆ 종목을 입력하면 아래 5개 섹션이 자동으로 채워집니다:\n\n"
         "1️⃣ 기술적 분석  2️⃣ 뉴스/센티먼트\n"
-        "3️⃣ 상대 강도  4️⃣ 시장 분위기\n"
+        "3️⃣ 페어 트레이딩  4️⃣ 시장 분위기\n"
         "5️⃣ 통합 AI 프롬프트"
     )
 
@@ -84,77 +84,96 @@ def _load_fg() -> FearGreedResult:
     return MarketSentimentCollector().fetch()
 
 
-@st.cache_data(ttl=172800, show_spinner=False)  # 48h — reduces yfinance re-fetch frequency
-def _load_peers(ticker: str) -> dict | None:
-    """
-    INDUSTRY_GROUPS에서 동종 종목을 찾아 ratio Z-score를 계산한다.
-    cointegration 검정 없이 60일 rolling ratio 기반 단순 Z-score 사용.
-    """
-    try:
-        from analysis.quant.pair_scanner import INDUSTRY_GROUPS
-    except ImportError:
+# 페어 트레이딩 신호 — 07_pairs_trading.py와 동일한 클래스를 재사용한다.
+# PeerDiscovery(동종업종 탐색) → PairScanner(Engle-Granger 공적분 검정으로
+# 후보 중 p-value 최저 = 가장 신뢰도 높은 피어 1개 선정) → QuantAggregator
+# (OLS + 칼만 앙상블). 페어 트레이딩 페이지의 "자동 스캔"과 "직접 분석" 탭을
+# 그대로 이어붙인 것과 동일한 계산이므로, 같은 파라미터로 같은 쌍을 분석하면
+# 두 페이지의 수치가 일치한다.
+_PAIR_ALPHA = 0.05
+_PAIR_PERIOD = "1y"
+_PAIR_ZSCORE_WINDOW = 30
+_PAIR_ENTRY_Z = 2.0
+_PAIR_EXIT_Z = 0.5
+_PAIR_KALMAN_DELTA = 1e-4
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _discover_peer_candidates(ticker: str) -> tuple[list[str], dict[str, str], str, str]:
+    """동종업종 피어 탐색. 07_pairs_trading.py 자동 스캔 탭의 '업종 분류 기반'과 동일
+    (PeerDiscovery: KR=네이버 업종 / US=S&P500 GICS, INDUSTRY_GROUPS 보조 포함)."""
+    from analysis.quant.pair_scanner import PeerDiscovery
+    pg = PeerDiscovery(top_n=10).find(ticker)
+    return pg.tickers, pg.names, pg.sector, pg.source
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _best_cointegrated_peer(
+    ticker: str, tickers_tuple: tuple, names_json: str, alpha: float,
+) -> tuple[str, float, bool] | None:
+    """후보 피어들에 Engle-Granger 공적분 검정을 돌려 p-value가 가장 낮은
+    (=가장 신뢰도 높은) 피어 하나를 고른다. PairScanner.scan_tickers는 이미
+    p-value 오름차순으로 정렬해 반환한다."""
+    import json
+    from analysis.quant.pair_scanner import PairScanner
+
+    names = json.loads(names_json)
+    scanner = PairScanner(period=_PAIR_PERIOD, alpha=alpha)
+    prices = scanner.fetch_prices_for(list(tickers_tuple))
+    results = scanner.scan_tickers(
+        list(tickers_tuple), names, prices, seed_ticker=ticker,
+    )
+    if not results:
         return None
+    best = results[0]
+    return best.ticker_b, best.pvalue, best.is_cointegrated
 
-    peers: list[str] = []
-    group_name = ""
-    for gname, gdata in INDUSTRY_GROUPS.items():
-        if ticker in gdata.get("tickers", []):
-            peers = [t for t in gdata["tickers"] if t != ticker][:4]
-            group_name = gname
-            break
 
-    if not peers:
-        return None
+@st.cache_data(ttl=1800, show_spinner=False)
+def _run_pair_aggregate(ticker: str, peer: str, alpha: float):
+    """OLS + 칼만 앙상블. 07_pairs_trading.py 직접 분석 탭과 동일한 QuantAggregator."""
+    from analysis.quant.aggregator import QuantAggregator
+    return QuantAggregator(
+        period=_PAIR_PERIOD, zscore_window=_PAIR_ZSCORE_WINDOW,
+        entry_z=_PAIR_ENTRY_Z, exit_z=_PAIR_EXIT_Z,
+        kalman_delta=_PAIR_KALMAN_DELTA, alpha=alpha,
+    ).run_pair(ticker, peer)
 
-    collector = PriceCollector()
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _load_pair_analysis(ticker: str) -> dict | None:
+    import json
+
     try:
-        df_a = collector.fetch(ticker, period="6mo")[["Close"]].rename(columns={"Close": "A"})
+        tickers, names, sector, source = _discover_peer_candidates(ticker)
     except Exception:
         return None
 
-    best: dict | None = None
-    best_abs_z = 0.0
+    if len([t for t in tickers if t != ticker]) < 1:
+        return None
 
-    for peer in peers:
-        try:
-            df_b = (
-                collector.fetch(peer, period="6mo")[["Close"]]
-                .rename(columns={"Close": "B"})
-            )
-            df = df_a.join(df_b, how="inner").dropna()
-            if len(df) < 30:
-                continue
-            ratio  = df["A"] / df["B"]
-            mu     = ratio.rolling(60, min_periods=30).mean().iloc[-1]
-            sigma  = ratio.rolling(60, min_periods=30).std().iloc[-1]
-            if sigma == 0 or pd.isna(mu) or pd.isna(sigma):
-                continue
-            z = float((ratio.iloc[-1] - mu) / sigma)
-            if abs(z) > best_abs_z:
-                best_abs_z = abs(z)
-                # peer name
-                names = INDUSTRY_GROUPS.get(group_name, {}).get("names", {})
-                peer_name = names.get(peer, peer)
-                # direction interpretation
-                if z > 0.5:
-                    direction = f"{ticker}가 {peer_name} 대비 **상대적 고평가** (매수 신중)"
-                elif z < -0.5:
-                    direction = f"{ticker}가 {peer_name} 대비 **상대적 저평가** (매수 관심)"
-                else:
-                    direction = f"{ticker}와 {peer_name} 간 가격 비율이 **평균 수준** (중립)"
-                best = {
-                    "peer": peer,
-                    "peer_name": peer_name,
-                    "zscore": z,
-                    "group": group_name,
-                    "direction": direction,
-                    "ratio": float(ratio.iloc[-1]),
-                    "ratio_mean": float(mu),
-                }
-        except Exception:
-            continue
+    try:
+        best = _best_cointegrated_peer(
+            ticker, tuple(tickers), json.dumps(names, ensure_ascii=False), _PAIR_ALPHA,
+        )
+    except Exception:
+        best = None
+    if not best:
+        return None
+    peer, _pvalue, _is_coint = best
 
-    return best
+    try:
+        result = _run_pair_aggregate(ticker, peer, _PAIR_ALPHA)
+    except Exception:
+        return None
+
+    return {
+        "peer": peer,
+        "peer_name": names.get(peer, peer),
+        "sector": sector,
+        "source": source,
+        "result": result,  # AggregatedPairResult
+    }
 
 
 # ── Page title ────────────────────────────────────────────────────────────────
@@ -316,46 +335,51 @@ else:
 
 st.divider()
 
-# ── Section 3: 페어 상대 강도 ───────────────────────────────────────────────
-st.markdown("### 3️⃣  페어 상대 강도")
+# ── Section 3: 페어 트레이딩 신호 ───────────────────────────────────────────
+st.markdown("### 3️⃣  페어 트레이딩 신호")
 
-with st.spinner("동종 종목 비교 중…"):
-    peer_result = _load_peers(ticker)
+with st.spinner("동종업종 피어 탐색 + 공적분 검정 중…"):
+    pair_info = _load_pair_analysis(ticker)
 
-if peer_result:
-    z       = peer_result["zscore"]
-    z_color = "#ef5350" if z > 0.5 else ("#26a69a" if z < -0.5 else "#9E9E9E")
-    z_icon  = "🔴" if z > 1 else ("🟠" if z > 0.5 else ("🟢" if z < -0.5 else "⚪"))
+if pair_info:
+    agg    = pair_info["result"]
+    coint  = agg.coint_result
+    z      = agg.composite_zscore
+    signal = agg.signal_a
 
-    pc1, pc2, pc3 = st.columns([1, 1, 2])
-    pc1.metric(
-        "비교 종목",
-        f"{peer_result['peer_name']}",
-        f"{peer_result['peer']}",
-    )
+    sig_color = {"BUY": "#26a69a", "SELL": "#ef5350", "CLOSE": "#FF9800"}.get(signal, "#9E9E9E")
+    sig_rgb   = {"BUY": "38,166,154", "SELL": "239,83,80", "CLOSE": "255,152,0"}.get(signal, "100,100,100")
+
+    pc1, pc2, pc3, pc4 = st.columns([1, 1, 1, 2])
+    pc1.metric("비교 종목", pair_info["peer_name"], pair_info["peer"])
     pc2.metric(
-        "Z-score (60일)",
-        f"{z:+.2f} σ",
-        f"업종: {peer_result['group']}",
+        "공적분 (Engle-Granger)",
+        "있음 ✅" if coint.is_cointegrated else "없음 ❌",
+        f"p={coint.pvalue:.4f}",
     )
-    with pc3:
+    pc3.metric(f"종합 Z-score ({_PAIR_ZSCORE_WINDOW}일)", f"{z:+.2f} σ", signal)
+    with pc4:
         st.markdown(
-            f'<div style="background:rgba({("239,83,80" if z>0.5 else "38,166,154" if z<-0.5 else "100,100,100")},0.12);'
-            f'border-left:3px solid {z_color};border-radius:0 8px 8px 0;padding:10px 14px">'
-            f'  {z_icon} {peer_result["direction"]}'
+            f'<div style="background:rgba({sig_rgb},0.12);'
+            f'border-left:3px solid {sig_color};border-radius:0 8px 8px 0;padding:10px 14px">'
+            f'  {agg.label}'
             f'</div>',
             unsafe_allow_html=True,
         )
+
+    w_ols, w_kalman = agg.contributions[0].weight, agg.contributions[1].weight
     st.caption(
-        f"Z-score 해석: |Z| > 2 = 통계적 이상 편차, 0.5~2 = 주의 구간, |Z| < 0.5 = 정상 범위  "
-        f"(60일 rolling ratio 기준, cointegration 검정 없음)"
+        f"업종: {pair_info['sector']}  ·  {pair_info['source']}  ·  "
+        f"OLS {w_ols*100:.0f}% / 칼만 {w_kalman*100:.0f}% 가중 앙상블  ·  "
+        f"공적분 유의수준 {_PAIR_ALPHA:.0%}, 기간 {_PAIR_PERIOD}  \n"
+        "📊 **페어 트레이딩** 페이지의 직접 분석 탭에서 이 쌍으로 상세 분석(차트 포함)을 확인할 수 있습니다."
     )
 else:
     st.caption(
         "이 종목에 대한 동종 비교 데이터가 없습니다.  \n"
         "📊 **페어 트레이딩** 페이지에서 직접 종목 쌍을 입력해 상세 분석을 받을 수 있습니다."
     )
-    peer_result = None
+    pair_info = None
 
 st.divider()
 
@@ -465,12 +489,15 @@ def _build_prompt() -> str:
         news_txt = f"수집 {total_collected}건 → 관련 뉴스 없음 (종목명·티커 포함 기사 없음)"
 
     # peer
-    if peer_result:
+    if pair_info:
+        _agg   = pair_info["result"]
+        _coint = _agg.coint_result
         peer_txt = (
-            f"비교 종목: {peer_result['peer_name']} ({peer_result['peer']}) "
-            f"[{peer_result['group']}]\n"
-            f"60일 Ratio Z-score: {peer_result['zscore']:+.2f} σ\n"
-            f"해석: {peer_result['direction']}"
+            f"비교 종목: {pair_info['peer_name']} ({pair_info['peer']}) [{pair_info['sector']}]\n"
+            f"공적분(Engle-Granger) p-value: {_coint.pvalue:.4f} "
+            f"({'공적분 있음' if _coint.is_cointegrated else '공적분 없음'}, "
+            f"유의수준 {_PAIR_ALPHA:.0%})\n"
+            f"종합(OLS+칼만) Z-score: {_agg.composite_zscore:+.2f} σ → {_agg.label}"
         )
     else:
         peer_txt = "동종 비교 데이터 없음"
