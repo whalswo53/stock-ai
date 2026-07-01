@@ -89,7 +89,7 @@ def ticker_search_widget(
     #   index 0 = "↩ 직접 입력"
     #   index 1+ = 후보들
     options = ["↩  직접 입력 (검색 건너뜀)"] + [
-        f"{name}  ({tkr})  [{mkt}]"
+        f"{name}  [{mkt}]" if not tkr else f"{name}  ({tkr})  [{mkt}]"
         for tkr, name, mkt in candidates
     ]
 
@@ -105,4 +105,8 @@ def ticker_search_widget(
 
     # 선택한 항목에서 티커 추출
     idx = options.index(sel) - 1   # ↩ 항목 제외
-    return candidates[idx][0]
+    tkr, name, mkt = candidates[idx]
+    if not tkr:
+        st.warning(name)
+        return ""
+    return tkr

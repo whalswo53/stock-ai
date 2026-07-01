@@ -22,7 +22,7 @@ from analysis.quant.pair_scanner import (
     PairScanResult,
     PeerDiscovery,
 )
-from config.sources import TICKER_KR_NAME, KOSPI_TICKER_MAP, NASDAQ_TICKER_MAP
+from config.sources import TICKER_KR_NAME, KOSPI_TICKER_MAP, NASDAQ_TICKER_MAP, HK_CN_TICKER_MAP
 from data.collectors.price_collector import PriceCollector
 
 # ── Palette ───────────────────────────────────────────────────────────────────
@@ -68,6 +68,7 @@ def _label(ticker: str) -> str:
 _KR_NAME_TO_TICKER: dict[str, str] = {}
 _KR_NAME_TO_TICKER.update(KOSPI_TICKER_MAP)
 _KR_NAME_TO_TICKER.update(NASDAQ_TICKER_MAP)
+_KR_NAME_TO_TICKER.update(HK_CN_TICKER_MAP)
 for _grp in INDUSTRY_GROUPS.values():
     for _t, _n in _grp["names"].items():
         _KR_NAME_TO_TICKER.setdefault(_n, _t)

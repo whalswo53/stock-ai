@@ -12,11 +12,22 @@ import re
 import time
 from typing import TYPE_CHECKING
 
-from config.sources import KOSPI_TICKER_MAP, NASDAQ_TICKER_MAP, TICKER_KR_NAME as _TICKER_KR_NAME
+from config.sources import (
+    KOSPI_TICKER_MAP,
+    NASDAQ_TICKER_MAP,
+    HK_CN_TICKER_MAP,
+    TICKER_KR_NAME as _TICKER_KR_NAME,
+)
 
 # ── Static base map ────────────────────────────────────────────────────────────
-_NAME_TO_TICKER: dict[str, str] = {**KOSPI_TICKER_MAP, **NASDAQ_TICKER_MAP}
+_NAME_TO_TICKER: dict[str, str] = {**KOSPI_TICKER_MAP, **NASDAQ_TICKER_MAP, **HK_CN_TICKER_MAP}
 _SORTED_NAMES: list[str] = sorted(_NAME_TO_TICKER, key=len, reverse=True)
+
+# ── 비상장 기업 (검색 시 안내만 표시, 매핑 티커 없음) ────────────────────────
+_UNLISTED_NAMES: dict[str, str] = {
+    "화웨이": "화웨이 — 비상장 기업으로 주가 데이터 없음",
+    "Huawei": "Huawei — 비상장 기업으로 주가 데이터 없음",
+}
 
 # ── Cache (6시간 TTL) ─────────────────────────────────────────────────────────
 _CACHE_TTL = 21_600  # 6 hours (reduced from 24h — retries faster after KRX outage)
@@ -221,6 +232,14 @@ _US_KR_NAMES: dict[str, str] = {
     "IBM": "IBM",
     "시스코": "CSCO",
     "델": "DELL",
+}
+
+# ── Exact-match lookup (대소문자 무시) ────────────────────────────────────────
+# "SMIC"/"TSMC"처럼 영문 1-5자 회사명이 실제 티커와 다른 경우,
+# 원시 티커로 오인되기 전에 먼저 매핑되도록 대문자 키로 색인한다.
+_EXACT_NAME_TO_TICKER: dict[str, str] = {
+    **{k.upper(): v for k, v in _NAME_TO_TICKER.items()},
+    **{k.upper(): v for k, v in _US_KR_NAMES.items()},
 }
 
 # ── NASDAQ100 영문명 (FDR 대신 하드코딩 — FDR NASDAQ 로드가 11초+ 소요) ─────
@@ -436,16 +455,24 @@ def resolve_ticker(raw: str) -> str:
     """
     한글/영문 회사명 또는 원시 입력 → yfinance 티커 변환.
     검색 우선순위:
-      1. 정규 형식 (6자리 숫자+.KS/.KQ, 영문 1-5자)
-      2. 정적 맵 (_NAME_TO_TICKER + _US_KR_NAMES)
-      3. ETF 맵 (한글 ETF명)
-      4. 입력값 대문자 반환 (fallback)
+      1. 정규 형식 (6자리 숫자+.KS/.KQ, 4-5자리 숫자+.HK/.SS/.SZ)
+      2. 정적 맵 대소문자 무시 완전 일치 (_NAME_TO_TICKER + _US_KR_NAMES)
+      3. 영문 1-5자 원시 티커 형식
+      4. 정적 맵 부분 일치 (_NAME_TO_TICKER + _US_KR_NAMES)
+      5. ETF 맵 (한글 ETF명)
+      6. 입력값 대문자 반환 (fallback)
     """
     raw = raw.strip()
     if not raw:
         return raw
+    if any(name in raw for name in _UNLISTED_NAMES):
+        return ""
     if re.match(r"^\d{6}\.(KS|KQ)$", raw, re.IGNORECASE):
         return raw.upper()
+    if re.match(r"^\d{4,5}\.(HK|SS|SZ)$", raw, re.IGNORECASE):
+        return raw.upper()
+    if raw.upper() in _EXACT_NAME_TO_TICKER:
+        return _EXACT_NAME_TO_TICKER[raw.upper()]
     if re.match(r"^[A-Z]{1,5}(-[A-Z])?$", raw, re.IGNORECASE):
         return raw.upper()
     for name in _SORTED_NAMES:
@@ -468,6 +495,12 @@ def detect_market(ticker: str) -> str:
         return "KOSPI"
     if t.endswith(".KQ"):
         return "KOSDAQ"
+    if t.endswith(".HK"):
+        return "HKEX"
+    if t.endswith(".SS"):
+        return "SSE"
+    if t.endswith(".SZ"):
+        return "SZSE"
     return "NASDAQ"
 
 
@@ -478,7 +511,14 @@ def is_kr(ticker: str) -> bool:
 
 def fmt_price(val: float, ticker: str) -> str:
     """티커 기반으로 통화 포맷을 자동 선택한다."""
-    return f"₩{val:,.0f}" if is_kr(ticker) else f"${val:,.2f}"
+    t = ticker.upper()
+    if is_kr(t):
+        return f"₩{val:,.0f}"
+    if t.endswith(".HK"):
+        return f"HK${val:,.2f}"
+    if t.endswith((".SS", ".SZ")):
+        return f"¥{val:,.2f}"
+    return f"${val:,.2f}"
 
 
 def get_display_name(ticker: str) -> str:
@@ -555,4 +595,12 @@ def search_tickers(
             _add(sym, name, "S&P500", 2)
 
     heap.sort(key=lambda x: (x[0], x[1], x[2]))
-    return [(t, n, m) for _, _, _, t, n, m in heap[:max_results]]
+    results = [(t, n, m) for _, _, _, t, n, m in heap[:max_results]]
+
+    # ⑦ 비상장 기업 안내 (매핑 티커 없음 — 항상 최상단에 표시)
+    for name, notice in _UNLISTED_NAMES.items():
+        if q_lo in name.lower():
+            results.insert(0, ("", notice, "비상장"))
+            break
+
+    return results[:max_results]

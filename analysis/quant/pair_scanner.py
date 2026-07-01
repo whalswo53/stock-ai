@@ -82,6 +82,15 @@ INDUSTRY_GROUPS: dict[str, dict] = {
             "QCOM": "Qualcomm",
         },
     },
+    "반도체 파운드리 (글로벌)": {
+        "tickers": ["TSM", "UMC", "GFS", "0981.HK"],
+        "names": {
+            "TSM":     "TSMC",
+            "UMC":     "UMC",
+            "GFS":     "GlobalFoundries",
+            "0981.HK": "SMIC",
+        },
+    },
 }
 
 

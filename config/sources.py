@@ -111,6 +111,13 @@ TICKER_KR_NAME: dict[str, str] = {
     "141080.KQ": "리가켐바이오",
     "239890.KQ": "피엔에이치테크",
     "277810.KQ": "레인보우로보틱스",
+    # HK / China 반도체
+    "0981.HK": "SMIC (중신국제)",
+    "1347.HK": "화홍반도체",
+    "002371.SZ": "NAURA Technology",
+    "600584.SS": "JCET Group",
+    "603501.SS": "Will Semiconductor",
+    "603986.SS": "GigaDevice",
 }
 
 # Korean company name → yfinance ticker (KOSPI/KOSDAQ)
@@ -205,6 +212,11 @@ NASDAQ_TICKER_MAP: dict[str, str] = {
     "브로드컴": "AVGO",
     "Broadcom": "AVGO",
     "TSMC": "TSM",
+    "UMC": "UMC",
+    "유나이티드마이크로일렉트로닉스": "UMC",
+    "글로벌파운드리": "GFS",
+    "글로벌파운드리스": "GFS",
+    "GlobalFoundries": "GFS",
     "ARM": "ARM",
     # Cloud / SaaS
     "넷플릭스": "NFLX",
@@ -225,4 +237,21 @@ NASDAQ_TICKER_MAP: dict[str, str] = {
     "SPY": "SPY",
     "SOXL": "SOXL",
     "TQQQ": "TQQQ",
+}
+
+# Hong Kong / China 반도체 종목명 → yfinance 티커 (SEHK: .HK, Shanghai: .SS, Shenzhen: .SZ)
+HK_CN_TICKER_MAP: dict[str, str] = {
+    "SMIC": "0981.HK",
+    "중신국제": "0981.HK",
+    "화홍반도체": "1347.HK",
+    "Hua Hong": "1347.HK",
+    "화홍": "1347.HK",
+    "NAURA": "002371.SZ",
+    "베이팡화촹": "002371.SZ",
+    "JCET": "600584.SS",
+    "창장과기": "600584.SS",
+    "Will Semiconductor": "603501.SS",
+    "웨이얼반도체": "603501.SS",
+    "GigaDevice": "603986.SS",
+    "자오이촹신": "603986.SS",
 }
