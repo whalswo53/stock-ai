@@ -132,12 +132,14 @@ class PairScanner:
         zscore_window: int = 30,
         entry_z: float = 2.0,
         exit_z: float = 0.5,
+        alpha: float = 0.05,
     ) -> None:
         self._collector = PriceCollector()
         self.period = period
         self.zscore_window = zscore_window
         self.entry_z = entry_z
         self.exit_z = exit_z
+        self.alpha = alpha
 
     # ── Public ────────────────────────────────────────────────────────────
 
@@ -280,7 +282,7 @@ class PairScanner:
                 name_a=names.get(ta, ta),
                 name_b=names.get(tb, tb),
                 pvalue=float(pvalue),
-                is_cointegrated=bool(pvalue < 0.05),
+                is_cointegrated=bool(pvalue < self.alpha),
                 hedge_ratio=round(hedge_ratio, 4),
                 zscore_latest=round(z_now, 4) if not np.isnan(z_now) else float("nan"),
                 signal_a=signal_a,
@@ -357,6 +359,34 @@ def _static_group_peers(ticker: str, top_n: int, source_suffix: str = "") -> Pee
         f"'{ticker}'는 자동 업종 분류를 지원하지 않는 해외 거래소 종목입니다. "
         "현재 INDUSTRY_GROUPS에 등록된 종목군(예: 반도체 파운드리 - TSM/UMC/GFS/SMIC)만 지원합니다."
     )
+
+
+def _augment_with_industry_groups(pg: "PeerGroup") -> "PeerGroup":
+    """Supplements a KR/US classification-based PeerGroup with any
+    INDUSTRY_GROUPS peers registered for the same seed ticker.
+
+    PeerDiscovery's KR/US branches each search within a single country's
+    listing (Naver/KRX-DESC for KR, S&P500 GICS for US), so they cannot
+    surface a cross-border peer like SMIC (0981.HK) for a KR/US semiconductor
+    seed. INDUSTRY_GROUPS is the only place in this module with curated
+    cross-border groups (e.g. "반도체 파운드리 (글로벌)"), so when the seed
+    happens to be registered there, its groupmates are appended as extra
+    peers rather than being left out entirely.
+    """
+    for gname, gdata in INDUSTRY_GROUPS.items():
+        group_tickers = gdata.get("tickers", [])
+        if pg.seed_ticker not in group_tickers:
+            continue
+        group_names = gdata.get("names", {})
+        extras = [t for t in group_tickers if t not in pg.tickers]
+        if not extras:
+            return pg
+        pg.tickers = pg.tickers + extras
+        for t in extras:
+            pg.names[t] = group_names.get(t, t)
+        pg.source = f"{pg.source} + INDUSTRY_GROUPS 보조 종목 ({gname})"
+        return pg
+    return pg
 
 
 # ── yfinance-to-GICS sector mapping (S&P500 listing uses GICS names) ─────────
@@ -692,6 +722,14 @@ class PeerDiscovery:
     ─────────────────────────────────────────────────────────
     KR/US 분류 소스가 없으므로 INDUSTRY_GROUPS 정적 종목군으로 폴백합니다.
     → 출처: "정적 업종 그룹 (INDUSTRY_GROUPS)"
+
+    국가 간 보조 통합
+    ──────────────────
+    KR/US 분류는 각각 자국 상장 종목 안에서만 검색되므로 (네이버/KRX-DESC는
+    KR 상장만, S&P500 GICS는 US 상장만 커버) SMIC(0981.HK) 같은 해외 파운드리
+    피어는 원천적으로 잡히지 않습니다. KMeansPeerDiscovery처럼 가격 기반
+    완전 통합은 아니지만, 시드 종목이 INDUSTRY_GROUPS에도 등록되어 있으면
+    그 그룹의 해외 종목을 결과에 보조로 추가합니다.
     """
 
     def __init__(self, top_n: int = 10, scan_depth: int = 80) -> None:
@@ -705,10 +743,10 @@ class PeerDiscovery:
     def find(self, ticker: str) -> PeerGroup:
         ticker = ticker.strip().upper()
         if self.is_korean(ticker):
-            return self._find_kr_peers(ticker)
+            return _augment_with_industry_groups(self._find_kr_peers(ticker))
         if _is_other_market(ticker):
             return _static_group_peers(ticker, self.top_n)
-        return self._find_us_peers(ticker)
+        return _augment_with_industry_groups(self._find_us_peers(ticker))
 
     # ── Korean peers ──────────────────────────────────────────────────────
 

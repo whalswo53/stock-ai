@@ -118,13 +118,13 @@ def _resolve_ticker(raw: str) -> tuple[str, str | None]:
 
 # ── Scan result table styling ─────────────────────────────────────────────────
 
-def _style_scan(df: pd.DataFrame) -> pd.DataFrame:
+def _style_scan(df: pd.DataFrame, alpha: float = 0.05) -> pd.DataFrame:
     styles = pd.DataFrame("", index=df.index, columns=df.columns)
     for i, row in df.iterrows():
         pv = row["p-value"]
-        if pv < 0.05:
+        if pv < alpha:
             styles.loc[i, "p-value"] = "color:#26a69a;font-weight:bold"
-        elif pv < 0.1:
+        elif pv < max(alpha * 2, 0.1):
             styles.loc[i, "p-value"] = "color:#FF9800"
         else:
             styles.loc[i, "p-value"] = "color:#9E9E9E"
@@ -143,6 +143,7 @@ def _render_scan_results(
     scan_results: list[PairScanResult],
     source_note: str = "",
     df_key: str = "scan_df",
+    alpha: float = 0.05,
 ) -> None:
     scanner = PairScanner()
     df_all  = scanner.to_dataframe(scan_results)
@@ -153,7 +154,7 @@ def _render_scan_results(
     m1.metric("검정 쌍 수", len(scan_results))
     m2.metric("공적분 확인",
               f"{n_coint}쌍",
-              help="p-value < 0.05 기준으로 장기 동조 관계가 확인된 쌍 수")
+              help=f"p-value < {alpha:.2f} 기준으로 장기 동조 관계가 확인된 쌍 수")
     m3.metric("최저 p-value", f"{scan_results[0].pvalue:.4f}" if scan_results else "—",
               help="낮을수록 공적분 관계가 강합니다")
 
@@ -163,7 +164,7 @@ def _render_scan_results(
     st.markdown("##### 검정 결과 (p-value 낮은 순 · 상위 5쌍)")
     top5  = df_show.head(5)
     event = st.dataframe(
-        top5.style.apply(_style_scan, axis=None),
+        top5.style.apply(_style_scan, alpha=alpha, axis=None),
         width="stretch", hide_index=True,
         selection_mode="single-row", on_select="rerun",
         key=df_key,
@@ -171,7 +172,7 @@ def _render_scan_results(
     if len(df_show) > 5:
         with st.expander(f"전체 {len(df_show)}쌍 보기"):
             st.dataframe(
-                df_show.style.apply(_style_scan, axis=None),
+                df_show.style.apply(_style_scan, alpha=alpha, axis=None),
                 width="stretch", hide_index=True,
             )
 
@@ -198,6 +199,18 @@ with st.sidebar:
 
     period_label  = st.selectbox("분석 기간", list(PERIOD_OPTIONS.keys()), index=1)
     period        = PERIOD_OPTIONS[period_label]
+
+    st.divider()
+    st.subheader("공적분 검정 (자동 스캔)")
+    alpha_label   = st.radio(
+        "유의수준", ["5% (엄격)", "10% (완화)"], index=0, horizontal=True,
+        help=(
+            "Engle-Granger 공적분 검정의 p-value 임계값입니다. "
+            "5%는 통계적으로 더 엄격하고, 10%는 후보 쌍을 더 많이 통과시킵니다 "
+            "(자동 스캔 탭에만 적용, 직접 분석 탭은 5% 고정)."
+        ),
+    )
+    alpha = 0.05 if alpha_label.startswith("5%") else 0.10
 
     st.divider()
     st.subheader("신호 임계값")
@@ -257,12 +270,12 @@ def _fetch_peer_prices(tickers_tuple: tuple, period: str) -> dict[str, list]:
 @st.cache_data(ttl=1800, show_spinner=False)
 def _run_dynamic_scan(
     tickers_tuple: tuple, names_json: str, period: str, window: int, ez: float, xz: float,
-    seed_ticker: str = "",
+    seed_ticker: str = "", alpha: float = 0.05,
 ) -> list[PairScanResult]:
     names   = json.loads(names_json)
     raw     = _fetch_peer_prices(tickers_tuple, period)
     prices  = _restore_prices(raw)
-    scanner = PairScanner(period=period, zscore_window=window, entry_z=ez, exit_z=xz)
+    scanner = PairScanner(period=period, zscore_window=window, entry_z=ez, exit_z=xz, alpha=alpha)
     return scanner.scan_tickers(
         list(tickers_tuple), names, prices,
         seed_ticker=seed_ticker or None,
@@ -346,6 +359,8 @@ with tab_scan:
         st.caption(
             "🇰🇷 한국: 네이버 금융 업종 분류 + FDR KRX 시가총액 순위  |  "
             "🇺🇸 미국: Yahoo Finance 섹터 분류 + S&P500 구성종목  "
+            "(국가별 분류이므로 결과는 자국 상장 종목 위주 — 기준 종목이 "
+            "INDUSTRY_GROUPS에 등록된 경우에 한해 해외 파운드리 등 종목이 보조로 추가됨)  |  "
             "(최초 실행 후 30분 캐시)"
         )
 
@@ -400,7 +415,7 @@ with tab_scan:
                         scan_results = _run_dynamic_scan(
                             tuple(tickers_list), names_json,
                             period, zscore_window, entry_z, exit_z,
-                            seed_ticker,
+                            seed_ticker, alpha,
                         )
                         scan_error = None
                     except Exception as e:
@@ -412,7 +427,8 @@ with tab_scan:
                     st.warning("분석 가능한 쌍이 없습니다. 기간을 늘리거나 N을 높여보세요.")
                 else:
                     _render_scan_results(
-                        scan_results, source_note=source, df_key="scan_df_dynamic"
+                        scan_results, source_note=source, df_key="scan_df_dynamic",
+                        alpha=alpha,
                     )
         else:
             st.info("기준 종목을 입력하고 **탐색 시작** 버튼을 누르세요.")
