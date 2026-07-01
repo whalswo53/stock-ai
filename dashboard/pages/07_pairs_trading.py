@@ -355,19 +355,26 @@ with tab_scan:
         horizontal=True,
         help=(
             "**업종 분류 기반**: 네이버 금융 / KRX 업종 코드로 같은 업종 종목 탐색 (빠름)\n\n"
-            "**주가 움직임 기반 (K-means)**: 최근 2년 주가 패턴으로 군집화 "
+            "**주가 움직임 기반 (K-means)**: 시드 종목의 yfinance 업종(대분류)으로 먼저 "
+            "후보를 걸러낸 뒤 그 안에서만 최근 2년 주가 패턴으로 군집화 "
             "— KOSPI/KOSDAQ + S&P500 + 홍콩/중국/대만 종목을 국가 구분 없이 "
-            "하나의 글로벌 풀로 합쳐 군집화 (최초 실행 60~90초 소요)"
+            "하나의 글로벌 풀로 합치되, 업종이 다른 종목은 제외합니다 "
+            "(업종 정보가 없는 종목은 K-means를 지원하지 않음, 최초 실행 90~150초 소요)"
         ),
     )
     disc_method_key = "kmeans" if "K-means" in disc_method else "sector"
 
     if disc_method_key == "kmeans":
+        st.warning(
+            "⚠️ 주가 움직임 기반 클러스터링은 같은 업종(대분류)으로 1차 필터링은 하지만, "
+            "그 안에서도 업종과 무관하게 나올 수 있습니다. **반드시 아래 공적분 검정 결과를 "
+            "함께 확인**하고, 공적분이 없는 쌍은 신뢰하지 마세요."
+        )
         st.caption(
-            "🌐 **글로벌 통합 풀에서 탐색 중** — KOSPI/KOSDAQ + S&P500 + "
-            "INDUSTRY_GROUPS 홍콩/중국/대만 종목을 국가·거래소 구분 없이 "
-            "하나의 풀로 합쳐 K-means 클러스터링 (원화 종목은 일별 환율로 USD 환산 후 비교, "
-            "최초 실행 후 30분 캐시)"
+            "🌐 **업종 필터 + 글로벌 통합 풀에서 탐색 중** — KOSPI/KOSDAQ + S&P500 + "
+            "INDUSTRY_GROUPS 홍콩/중국/대만 종목을 국가·거래소 구분 없이 하나의 풀로 합친 뒤, "
+            "시드 종목의 yfinance 업종(대분류)과 같은 종목만 남겨 K-means 클러스터링 "
+            "(원화 종목은 일별 환율로 USD 환산 후 비교, 최초 실행 후 30분 캐시)"
         )
     else:
         st.caption(
@@ -394,7 +401,7 @@ with tab_scan:
             st.session_state["last_disc_key"] = disc_key
 
             spinner_msg = (
-                f"'{_get_name(seed_ticker)}' 글로벌 통합 풀에서 주가 군집 분석 중… (최초 실행 시 약 60~90초)"
+                f"'{_get_name(seed_ticker)}' 업종 필터링 + 글로벌 통합 풀 주가 군집 분석 중… (최초 실행 시 약 90~150초)"
                 if disc_method_key == "kmeans"
                 else f"'{_get_name(seed_ticker)}' 동종업종 탐색 중… (최초 실행 시 약 10~20초)"
             )

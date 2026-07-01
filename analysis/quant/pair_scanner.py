@@ -406,6 +406,30 @@ _YF_TO_GICS: dict[str, str] = {
 }
 
 
+@cache
+def _yf_sector_for(ticker: str) -> str:
+    """Best-effort yfinance sector lookup, mapped to GICS-style naming via
+    _YF_TO_GICS. Returns '' if yfinance has no sector for this ticker.
+
+    Used by KMeansPeerDiscovery to pre-filter its global candidate pool to
+    the seed's broad sector before clustering — otherwise price-only
+    clustering can group tickers whose charts happen to move together despite
+    being in unrelated industries (e.g. a pharma stock next to a foundry).
+    Cached forever (process lifetime): this fires for every KOSPI/KOSDAQ/
+    INDUSTRY_GROUPS candidate not already covered by the S&P500 GICS column,
+    so without caching every new seed search would re-pay the full ~80-90
+    call cost instead of reusing it.
+    """
+    import yfinance as yf
+    try:
+        info = yf.Ticker(ticker).info
+        raw = info.get('sector') or ''
+        time.sleep(0.3)
+        return _YF_TO_GICS.get(raw, raw)
+    except (_YFRateLimitError, Exception):
+        return ''
+
+
 # ── Process-level cached listing loaders (re-fetched only on server restart) ──
 
 def _github_krx_csv(subpath: str) -> pd.DataFrame:
@@ -841,13 +865,26 @@ class KMeansPeerDiscovery:
     Finds peers via K-means clustering on normalized price movements,
     across a single global candidate pool — no country/exchange split.
 
-    Global pool (universe)
-    ───────────────────────
+    Sector pre-filter (safety gate)
+    ─────────────────────────────────
+    Pure price-movement clustering can group tickers that simply moved
+    together over the window despite being in unrelated industries (e.g. a
+    pharma stock and an insurer next to a semiconductor foundry). Before
+    clustering, the candidate pool is filtered down to yfinance's broad
+    sector (mapped to GICS-style naming) for the seed ticker — clustering
+    only ever runs within that same-sector subset. If the seed has no
+    yfinance sector at all, K-means is not attempted; the caller falls back
+    to the curated INDUSTRY_GROUPS static group instead.
+
+    Global pool (universe, pre-filter)
+    ────────────────────────────────────
     KOSPI 상위 universe_size개 + KOSDAQ 상위 universe_size개
     + S&P500 상위 universe_size개 + INDUSTRY_GROUPS 등록 해외 종목
       (홍콩/중국/대만 등, 예: SMIC = 0981.HK)
-    을 하나의 후보 풀로 합쳐서 사용합니다. 반도체처럼 국가 구분 없는
-    글로벌 공급망 섹터는 이렇게 봐야 실제 피어를 놓치지 않습니다.
+    을 하나의 후보 풀로 합친 뒤, 시드 종목의 yfinance 업종(대분류, GICS
+    스타일)과 같은 종목만 남깁니다. 반도체처럼 국가 구분 없는 글로벌
+    공급망 섹터라도, 업종이 다른 종목까지 섞이면 안 되므로 국가 구분은
+    없애되 업종 구분은 유지합니다.
 
     통화 정규화
     ────────────
@@ -856,9 +893,13 @@ class KMeansPeerDiscovery:
     순수한 "움직임 패턴"만으로 비교하기 위함입니다.
 
     Optimal K: elbow method (kneedle 방식 — 대각선까지 최대 거리)
+
+    ⚠ 주가 움직임 기반 결과이므로, 실제로 신뢰할 종목 쌍인지는 반드시
+    공적분 검정(Engle-Granger) 결과와 함께 확인해야 합니다.
     """
 
     MIN_COMMON_DAYS = 100
+    MIN_SECTOR_CANDIDATES = 3  # 시드 제외, 같은 업종 후보가 이보다 적으면 폴백
 
     def __init__(
         self,
@@ -876,12 +917,30 @@ class KMeansPeerDiscovery:
 
     def find(self, ticker: str) -> PeerGroup:
         ticker = ticker.strip().upper()
+        seed_sector, seed_industry, _seed_name = self._seed_info(ticker)
+
+        if not seed_sector:
+            # No yfinance sector for the seed → nothing to safely filter by,
+            # so don't expose an unfiltered (potentially unrelated) cluster.
+            try:
+                return _static_group_peers(
+                    ticker, self.top_n,
+                    source_suffix=" (K-means 미지원: 업종 정보 부족 → 정적 폴백)",
+                )
+            except Exception:
+                raise ValueError(
+                    f"'{ticker}'는 yfinance 업종(sector) 정보가 없어 K-means 클러스터링을 "
+                    "지원하지 않습니다 (업종 필터 없이는 결과를 신뢰할 수 없어 노출하지 "
+                    "않습니다). INDUSTRY_GROUPS 정적 종목군에도 등록되어 있지 않습니다."
+                )
+
         try:
-            return self._find_global(ticker)
+            return self._find_global(ticker, seed_sector, seed_industry)
         except Exception as primary_err:
-            # Last-resort safety net: seed has no fetchable yfinance history
-            # (e.g. delisted or unsupported ticker) — fall back to the
-            # curated static group if the seed happens to be registered there.
+            # Last-resort safety net: seed has no fetchable yfinance price
+            # history, or too few same-sector candidates for a meaningful
+            # cluster — fall back to the curated static group if the seed
+            # happens to be registered there.
             try:
                 return _static_group_peers(
                     ticker, self.top_n,
@@ -893,12 +952,22 @@ class KMeansPeerDiscovery:
     # ── Universe builder ─────────────────────────────────────────────────────
 
     def _build_universe_global(
-        self, ticker: str
-    ) -> tuple[list[str], dict[str, str]]:
+        self, ticker: str, seed_gics_sector: str,
+    ) -> tuple[list[str], dict[str, str], int]:
         """Combines KOSPI/KOSDAQ + S&P500 + INDUSTRY_GROUPS overseas tickers
-        into one candidate pool, regardless of the seed ticker's own market."""
+        into one candidate pool, regardless of the seed ticker's own market,
+        then keeps only candidates in the seed's broad sector.
+
+        S&P500 candidates already carry a GICS 'Sector' column (free — no
+        extra call). KOSPI/KOSDAQ/INDUSTRY_GROUPS candidates need a yfinance
+        sector lookup (_yf_sector_for, cached per ticker for the process
+        lifetime) since neither KRX listing has a GICS-comparable column.
+
+        Returns (filtered_universe_incl_seed, names, raw_pool_size).
+        """
         pool: list[str] = []
         names: dict[str, str] = {}
+        sp500_gics: dict[str, str] = {}
 
         krx = _load_krx_listing()
         for market_key, suffix in (('KOSPI', '.KS'), ('KOSDAQ', '.KQ')):
@@ -917,6 +986,7 @@ class KMeansPeerDiscovery:
             t = str(row['Symbol'])
             pool.append(t)
             names[t] = str(row['Name'])
+            sp500_gics[t] = str(row['Sector'])
 
         for gdata in INDUSTRY_GROUPS.values():
             for t, n in gdata.get('names', {}).items():
@@ -924,12 +994,21 @@ class KMeansPeerDiscovery:
                     pool.append(t)
                     names[t] = n
 
-        universe = list(dict.fromkeys(pool))  # de-dup, keep first occurrence order
-        if ticker not in universe:
-            universe.append(ticker)
+        raw_pool = list(dict.fromkeys(pool))  # de-dup, keep first occurrence order
+
+        filtered = [ticker]
+        for t in raw_pool:
+            if t == ticker:
+                continue
+            gics = sp500_gics.get(t)
+            if gics is None:
+                gics = _yf_sector_for(t)
+            if gics and gics == seed_gics_sector:
+                filtered.append(t)
+
         names.setdefault(ticker, ticker)
 
-        return universe, names
+        return filtered, names, len(raw_pool)
 
     # ── Seed classification (display only — clustering itself is pool-wide) ──
 
@@ -1049,13 +1128,34 @@ class KMeansPeerDiscovery:
 
     # ── Global finder ───────────────────────────────────────────────────────────
 
-    def _find_global(self, ticker: str) -> PeerGroup:
-        seed_sector, seed_industry, _seed_name = self._seed_info(ticker)
+    def _find_global(
+        self, ticker: str, seed_sector: str, seed_industry: str,
+    ) -> PeerGroup:
+        seed_gics = _YF_TO_GICS.get(seed_sector, seed_sector)
 
-        universe, name_map = self._build_universe_global(ticker)
+        universe, name_map, raw_pool_size = self._build_universe_global(ticker, seed_gics)
+
+        n_candidates = len(universe) - 1  # excluding the seed itself
+        if n_candidates < self.MIN_SECTOR_CANDIDATES:
+            raise ValueError(
+                f"'{seed_gics}' 섹터 내 같은 업종 후보가 부족합니다 "
+                f"({n_candidates}개, 최소 {self.MIN_SECTOR_CANDIDATES}개 필요) — "
+                "업종이 다른 종목을 억지로 묶는 대신 폴백합니다."
+            )
+
         close = self._fetch_close(universe)
 
         peers, opt_k, cluster_size = self._cluster(close, ticker)
+
+        if cluster_size <= 1:
+            # Seed ended up alone in its own cluster — its price behavior
+            # diverged from every other same-sector candidate over the
+            # window. An empty peer list isn't useful; let find() fall back
+            # to the curated static group instead of showing "no peers".
+            raise ValueError(
+                f"'{seed_gics}' 섹터 내에서도 '{ticker}'와 같은 가격 움직임 군집을 "
+                f"찾지 못했습니다 (K={opt_k} 중 단독 클러스터)."
+            )
 
         # Preserve pool order (KOSPI → KOSDAQ → S&P500 → 해외, each already
         # ranked within its own source); cross-market marcap isn't a
@@ -1075,13 +1175,16 @@ class KMeansPeerDiscovery:
                 seed_industry + " · " if seed_industry else ""
             ) + (
                 f"클러스터 크기 {cluster_size}개 "
-                f"(K={opt_k}, 글로벌 universe {len(close.columns)}개)"
+                f"(K={opt_k}, {seed_gics} 섹터 후보 {len(close.columns)}개 / "
+                f"전체 풀 {raw_pool_size}개 중 필터링)"
             ),
             source=(
-                "K-means 클러스터링 · 글로벌 통합 풀 (국가/거래소 구분 없음) · "
+                f"K-means 클러스터링 · '{seed_gics}' 섹터 내 글로벌 통합 풀 "
+                "(국가/거래소 구분 없음, 업종은 yfinance sector로 1차 필터링) · "
                 f"KOSPI/KOSDAQ 상위 {self.universe_size}개 + "
-                f"S&P500 상위 {self.universe_size}개 + INDUSTRY_GROUPS 해외 종목 · "
-                "원화 종목은 일별 환율로 USD 환산 후 정규화"
+                f"S&P500 상위 {self.universe_size}개 + INDUSTRY_GROUPS 해외 종목 중 "
+                "동일 섹터만 · 원화 종목은 일별 환율로 USD 환산 후 정규화 · "
+                "⚠ 주가 움직임 기반 결과이므로 공적분 검정 결과를 함께 확인하세요"
             ),
             tickers=peers,
             names=names,
