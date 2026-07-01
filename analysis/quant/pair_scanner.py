@@ -315,6 +315,50 @@ class PeerGroup:
     names: dict[str, str]  # ticker → display name
 
 
+# ── Non-KR/non-US ticker fallback (.HK, .SS, .SZ, .T, .TW, ...) ──────────────
+#
+# PeerDiscovery / KMeansPeerDiscovery only know how to classify KR (.KS/.KQ)
+# and bare-US tickers (via S&P500 GICS sectors). Any other exchange suffix
+# (e.g. SMIC = 0981.HK) has no automatic sector source, so it falls back to
+# the curated INDUSTRY_GROUPS map (the same source 03_comprehensive.py uses).
+
+def _is_other_market(ticker: str) -> bool:
+    """True for tickers with a non-KR exchange suffix (e.g. .HK, .SS, .SZ, .T)."""
+    if "." not in ticker:
+        return False
+    suffix = ticker.rsplit(".", 1)[-1]
+    return suffix not in ("KS", "KQ")
+
+
+def _static_group_peers(ticker: str, top_n: int, source_suffix: str = "") -> PeerGroup:
+    """Looks up INDUSTRY_GROUPS for a static peer set.
+
+    Used as a fallback for exchanges (HK/SS/SZ/T/...) that yfinance's
+    S&P500-based US peer discovery and KRX-based KR peer discovery can't cover.
+    """
+    for gname, gdata in INDUSTRY_GROUPS.items():
+        tickers = gdata.get("tickers", [])
+        if ticker in tickers:
+            names = gdata.get("names", {})
+            others = [t for t in tickers if t != ticker]
+            selected = [ticker] + others[: max(top_n - 1, 0)]
+            return PeerGroup(
+                seed_ticker=ticker,
+                sector=gname,
+                industry=gname,
+                source=(
+                    "정적 업종 그룹 (INDUSTRY_GROUPS) — Yahoo/S&P500·KRX 분류 미지원 해외 종목"
+                    + source_suffix
+                ),
+                tickers=selected,
+                names={t: names.get(t, t) for t in selected},
+            )
+    raise ValueError(
+        f"'{ticker}'는 자동 업종 분류를 지원하지 않는 해외 거래소 종목입니다. "
+        "현재 INDUSTRY_GROUPS에 등록된 종목군(예: 반도체 파운드리 - TSM/UMC/GFS/SMIC)만 지원합니다."
+    )
+
+
 # ── yfinance-to-GICS sector mapping (S&P500 listing uses GICS names) ─────────
 
 _YF_TO_GICS: dict[str, str] = {
@@ -643,6 +687,11 @@ class PeerDiscovery:
     ──────────
     FDR S&P500 리스팅의 Sector(GICS) 컬럼으로 필터링합니다.
     → 출처: "Yahoo Finance 섹터 분류 기준 (S&P500 구성종목)"
+
+    기타 해외 거래소 (.HK/.SS/.SZ/.T 등, 예: SMIC = 0981.HK)
+    ─────────────────────────────────────────────────────────
+    KR/US 분류 소스가 없으므로 INDUSTRY_GROUPS 정적 종목군으로 폴백합니다.
+    → 출처: "정적 업종 그룹 (INDUSTRY_GROUPS)"
     """
 
     def __init__(self, top_n: int = 10, scan_depth: int = 80) -> None:
@@ -657,6 +706,8 @@ class PeerDiscovery:
         ticker = ticker.strip().upper()
         if self.is_korean(ticker):
             return self._find_kr_peers(ticker)
+        if _is_other_market(ticker):
+            return _static_group_peers(ticker, self.top_n)
         return self._find_us_peers(ticker)
 
     # ── Korean peers ──────────────────────────────────────────────────────
@@ -762,6 +813,11 @@ class KMeansPeerDiscovery:
     가격 데이터 batch-download → 정규화(기준=100) → K-means
 
     Optimal K: elbow method (kneedle 방식 — 대각선까지 최대 거리)
+
+    기타 해외 거래소 (.HK/.SS/.SZ/.T 등, 예: SMIC = 0981.HK)
+    ─────────────────────────────────────────────────────────
+    yfinance batch-download 기반 universe(KR/S&P500)에 속하지 않으므로
+    K-means 대신 INDUSTRY_GROUPS 정적 종목군으로 폴백합니다.
     """
 
     MIN_COMMON_DAYS = 100
@@ -788,6 +844,10 @@ class KMeansPeerDiscovery:
         ticker = ticker.strip().upper()
         if self.is_korean(ticker):
             return self._find_kr(ticker)
+        if _is_other_market(ticker):
+            return _static_group_peers(
+                ticker, self.top_n, source_suffix=" (K-means 클러스터링 미적용)"
+            )
         return self._find_us(ticker)
 
     # ── Universe builders ──────────────────────────────────────────────────────
