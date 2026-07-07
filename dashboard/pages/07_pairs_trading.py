@@ -15,7 +15,10 @@ from plotly.subplots import make_subplots
 
 from analysis.quant.aggregator import AggregatedPairResult, QuantAggregator
 from analysis.quant.mean_reversion import MeanReversionResult
-from analysis.quant.spread_diagnostics import fit_ou, half_life, hurst_exponent
+from analysis.quant.spread_diagnostics import (
+    copula_metrics, fit_ou, half_life, hurst_exponent,
+)
+from utils.clipboard import copy_button
 from analysis.quant.pair_scanner import (
     INDUSTRY_GROUPS,
     KMeansPeerDiscovery,
@@ -228,6 +231,48 @@ def _render_scan_results(
             f"(p={picked.pvalue:.4f}) — "
             "**직접 분석 탭**에서 상세 분석을 확인하세요."
         )
+
+
+# ── 종합 대시보드 프롬프트 빌더 ────────────────────────────────────────────────
+
+def build_pair_dashboard_prompt(
+    label_a: str,
+    label_b: str,
+    summary_rows: list[dict],
+    signal_a: str,
+    signal_b: str,
+    signal_label: str,
+    meta: dict,
+) -> str:
+    """종합 대시보드 표 전체를 포함한 복붙용 AI 분석 프롬프트.
+
+    API 호출 없음 — 09_scalping의 build_scalping_prompt와 같은
+    '표 + 요청사항' 구조를 따른다.
+    """
+    table = "| 지표 | 값 | 판정 |\n|---|---|---|\n"
+    for r in summary_rows:
+        table += f"| {r['지표']} | {r['값']} | {r['판정']} |\n"
+
+    return f"""다음은 **{label_a} / {label_b}** 페어 트레이딩의 통계 분석 결과입니다.
+분석 설정: 기간 {meta['period']}, Z-score 윈도우 {meta['window']}일, 공적분 유의수준 {meta['alpha']:.0%}, 진입 ±{meta['entry_z']:.1f}σ, 청산 ±{meta['exit_z']:.1f}σ, 손절 ±{meta['stop_z']:.2f}σ (진입×{meta['stop_mult']:.2f}배)
+
+## 지표 종합 대시보드
+
+{table}
+## 현재 신호
+
+- {label_a}: **{signal_a}** / {label_b}: **{signal_b}**
+- {signal_label}
+
+## 요청사항
+
+위 지표를 종합해 다음을 판단해주세요:
+1. 이 페어가 통계적 차익거래에 적합한 쌍인지 (부적합 판정 지표가 있다면 그 영향 평가)
+2. 현재 시점의 행동: 신규 진입 / 관망 / 청산 / 강제 청산(손절) 중 택1과 근거
+3. 진입한다면 어느 쪽을 매수/매도할지와 주요 리스크
+
+⚠️ 위 지표 종합 판단 시 우선순위: **Hurst/반감기(1차 적합성) > 공적분(관계 검증) > Copula(꼬리위험) > Z-score(타이밍)**
+— 1차 적합성이 부적합이면 Z-score가 진입 구간이어도 진입하지 마세요."""
 
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -1041,6 +1086,120 @@ with tab_direct:
                 .map(_color_z, subset=["OLS Z", "Kalman Z"]),
                 width="stretch",
             )
+
+        # ── 섹션 6: 지표 종합 대시보드 & AI 프롬프트 ─────────────────────────
+        st.subheader("6. 지표 종합 대시보드")
+
+        pair_corr = float(ols.price_a.pct_change().corr(ols.price_b.pct_change()))
+        try:
+            cop = copula_metrics(ols.price_a, ols.price_b)
+        except Exception:
+            cop = None
+        z_now   = result.composite_zscore
+        stop_z  = entry_z * stop_mult
+
+        OK, WARN, BAD, NA = "✅ 적합", "⚠️ 주의", "❌ 부적합", "➖ 판단 불가"
+
+        def _v_coint():
+            if coint.pvalue < direct_alpha:  return OK
+            if coint.pvalue < 0.10:          return WARN
+            return BAD
+
+        def _v_corr():
+            if math.isnan(pair_corr): return NA
+            if pair_corr >= 0.70:     return OK
+            if pair_corr >= 0.35:     return WARN
+            return BAD
+
+        def _v_hurst():
+            if not math.isfinite(d_hurst): return NA
+            if d_hurst < 0.50:  return OK
+            if d_hurst < 0.55:  return WARN
+            return BAD
+
+        def _v_hl():
+            if not math.isfinite(d_hl): return BAD
+            if d_hl <= 30: return OK
+            if d_hl <= 60: return WARN
+            return BAD  # 60일 초과 = 부적합
+
+        def _v_ou_entry():
+            if ou_fit is None or not math.isfinite(ou_fit.suggested_entry_z): return NA
+            return OK if abs(ou_fit.suggested_entry_z - entry_z) < 0.4 else WARN
+
+        def _v_copula():
+            if cop is None: return NA
+            if cop.tail_dep_lower >= 0.30: return OK
+            if cop.tail_dep_lower >= 0.10: return WARN
+            return BAD
+
+        def _v_z():
+            if abs(z_now) >= stop_z:  return f"{BAD} — 손절 구간"
+            if abs(z_now) >= entry_z: return f"{WARN} — 진입 신호 구간"
+            if abs(z_now) < exit_z:   return f"{OK} — 평균 부근 (청산 구간)"
+            return "➖ 관망 구간"
+
+        summary_rows = [
+            {"지표": "공적분 p-value (Engle-Granger)",
+             "값": f"{coint.pvalue:.4f} (유의수준 {direct_alpha:.0%})",
+             "판정": _v_coint()},
+            {"지표": "일별 수익률 상관계수",
+             "값": f"{pair_corr:.3f}" if not math.isnan(pair_corr) else "N/A",
+             "판정": _v_corr()},
+            {"지표": "Hurst 지수 (스프레드)",
+             "값": f"{d_hurst:.3f}" if math.isfinite(d_hurst) else "N/A",
+             "판정": _v_hurst()},
+            {"지표": "OU 반감기",
+             "값": f"{d_hl:.1f}일" if math.isfinite(d_hl) else "∞ (비회귀)",
+             "판정": _v_hl()},
+            {"지표": "OU 파라미터 (θ / μ / σ_eq)",
+             "값": (f"θ={ou_fit.theta:.4f}/일 · μ={ou_fit.mu:.4f} · σ_eq={ou_fit.sigma_eq:.4f}"
+                    if ou_fit is not None else "피팅 실패 (평균회귀 구조 아님)"),
+             "판정": OK if ou_fit is not None else BAD},
+            {"지표": "OU 이론 진입 임계값",
+             "값": (f"±{ou_fit.suggested_entry_z:.2f}σ (현재 설정 ±{entry_z:.1f}σ)"
+                    if ou_fit is not None and math.isfinite(ou_fit.suggested_entry_z) else "N/A"),
+             "판정": _v_ou_entry()},
+            {"지표": "Copula 하방 꼬리의존 (λ_L)",
+             "값": (f"{cop.tail_dep_lower:.3f} (Kendall τ={cop.kendall_tau:.3f}, {cop.family})"
+                    if cop is not None else "N/A"),
+             "판정": _v_copula()},
+            {"지표": "현재 앙상블 Z-score",
+             "값": f"{z_now:+.3f}σ",
+             "판정": _v_z()},
+            {"지표": "손절선 (진입 {:.1f}σ × {:.2f})".format(entry_z, stop_mult),
+             "값": f"±{stop_z:.2f}σ",
+             "판정": (f"{BAD} — 손절선 도달" if abs(z_now) >= stop_z else f"{OK} — 손절선 이내")},
+        ]
+
+        def _color_verdict(val: str) -> str:
+            if val.startswith("✅"): return "color:#26a69a;font-weight:bold"
+            if val.startswith("⚠️"): return "color:#FF9800"
+            if val.startswith("❌"): return "color:#ef5350;font-weight:bold"
+            return "color:#9E9E9E"
+
+        st.dataframe(
+            pd.DataFrame(summary_rows).style.map(_color_verdict, subset=["판정"]),
+            width="stretch", hide_index=True,
+        )
+        st.caption(
+            "판단 우선순위: **Hurst/반감기 (1차 적합성) > 공적분 (관계 검증) > "
+            "Copula (꼬리위험) > Z-score (타이밍)** — 1차 적합성이 부적합이면 "
+            "Z-score가 진입 구간이어도 진입 금지"
+        )
+
+        dash_prompt = build_pair_dashboard_prompt(
+            label_a, label_b, summary_rows,
+            result.signal_a, result.signal_b, result.label,
+            meta={
+                "period": period_label, "window": zscore_window,
+                "alpha": direct_alpha, "entry_z": entry_z, "exit_z": exit_z,
+                "stop_z": stop_z, "stop_mult": stop_mult,
+            },
+        )
+        copy_button(dash_prompt, label="📋 AI 종합 분석 프롬프트 복사")
+        with st.expander("프롬프트 미리보기"):
+            st.code(dash_prompt, language=None)
 
     # ── SINGLE STOCK MODE ─────────────────────────────────────────────────────
     else:

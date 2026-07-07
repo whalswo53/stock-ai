@@ -15,7 +15,7 @@ from analysis.technical import candle_patterns
 from analysis.technical.indicators import (
     TechnicalIndicators, VOL_SPIKE_MULT, VWAP_WINDOW,
 )
-from config.sources import TICKER_KR_NAME
+from config.sources import TICKER_KR_NAME, TICKER_SECTOR
 from utils.ticker_utils import detect_market, is_kr
 from utils.search_widget import ticker_search_widget
 
@@ -429,21 +429,36 @@ else:
     with st.expander("❓ 신뢰도 산출 방식", expanded=False):
         st.markdown(
             "반전형(망치·장악·샛별·석별·도지)과 추세지속형(적삼병·흑삼병) 7종을 인식합니다.  \n"
-            "**신뢰도**: 이 종목의 **최근 5년** 일봉에서 같은 패턴이 같은 방향으로 발생했던 "
-            "모든 날의 **N일 후 수익률**로 승률·평균 수익률을 계산합니다.  \n"
-            "⚠️ 표본 수가 적으면(특히 별형·삼병류) 통계적 의미가 약하니 참고용으로만 쓰세요. "
-            "약세 패턴은 승률이 **낮을수록**(N일 후 하락) 패턴이 잘 맞은 것입니다."
+            "**통계**: 최근 5년 일봉에서 같은 (패턴, 방향)의 모든 발생일에 대해 **N일 후 "
+            "수익률**로 승률·평균을 계산하고, **이항검정**으로 승률이 50%와 유의하게 다른지 "
+            "검정합니다 (p < 0.05).  \n"
+            f"**판정**: 표본 {candle_patterns.MIN_SAMPLES}회 미만이면 무조건 **판단 불가**로 "
+            "표시합니다. 약세 패턴은 승률이 낮아야(하락 적중) 패턴이 맞은 것입니다.  \n"
+            "**복합 신호**: 거래량 동반(평균 1.5배↑), RSI 결합(강세+RSI≤40 / 약세+RSI≥60), "
+            "MACD 결합(히스토그램 부호 일치) 조건별로 승률을 분리 표시합니다.  \n"
+            "**업종 풀 집계**: 개별 종목 표본이 부족할 때 같은 업종 종목 전체의 발생을 "
+            "합산해 통계를 냅니다 (종목별 특성은 희석되는 트레이드오프)."
         )
 
-    horizon = st.radio(
-        "수익률 측정 기간 (N일 후)", [3, 5, 10], index=1, horizontal=True,
-        key="pattern_horizon",
-    )
+    pc1, pc2 = st.columns([1, 2])
+    with pc1:
+        horizon = st.radio(
+            "수익률 측정 기간 (N일 후)", [3, 5, 10], index=1, horizontal=True,
+            key="pattern_horizon",
+        )
+    with pc2:
+        pool_on = st.checkbox(
+            "업종 전체 종목 풀에서 집계 (개별 표본 부족 보완)",
+            value=False, key="pattern_pool",
+        )
 
     @st.cache_data(ttl=86400, show_spinner=False)
     def load_pattern_history(ticker: str) -> pd.DataFrame:
-        """패턴 통계용 5년 일봉 — 표시 기간과 무관하게 표본을 충분히 확보."""
-        return PriceCollector().fetch(ticker, period="5y")
+        """패턴 통계용 5년 일봉 + 지표(RSI/MACD/Vol_Ratio — 복합 신호용)."""
+        df5 = PriceCollector().fetch(ticker, period="5y")
+        if df5.empty:
+            return df5
+        return TechnicalIndicators().compute(df5)
 
     with st.spinner("5년 히스토리에서 패턴 통계 계산 중…"):
         hist5y = load_pattern_history(ticker)
@@ -451,31 +466,90 @@ else:
     if hist5y.empty or len(hist5y) < 120:
         st.caption("패턴 통계를 낼 만큼의 히스토리가 없습니다.")
     else:
-        hits = candle_patterns.recent_hits(hist5y, lookback_days=5, horizon=int(horizon))
+        hits = candle_patterns.recent_hits(hist5y, lookback_days=5)
         if not hits:
             st.info("최근 5거래일 내 인식된 캔들 패턴이 없습니다.")
         else:
-            rows = []
+            # 통계 집계 풀 구성 (기본: 이 종목 / 옵션: 같은 업종 전체)
+            stat_dfs = [hist5y]
+            pool_label = "이 종목 5년"
+            if pool_on:
+                _sector = TICKER_SECTOR.get(ticker) or TICKER_SECTOR.get(ticker.split(".")[0], "")
+                if not _sector:
+                    st.caption(
+                        "⚠️ 이 종목은 업종 매핑(TICKER_SECTOR)이 없어 개별 종목 기준으로 집계합니다."
+                    )
+                else:
+                    pool_tickers = [t for t, s_ in TICKER_SECTOR.items() if s_ == _sector][:10]
+                    if ticker not in pool_tickers:
+                        pool_tickers = [ticker] + pool_tickers[:9]
+                    with st.spinner(f"'{_sector}' 업종 {len(pool_tickers)}종목 히스토리 수집 중…"):
+                        stat_dfs = [
+                            d for d in (load_pattern_history(t) for t in pool_tickers)
+                            if not d.empty and len(d) >= 120
+                        ]
+                    pool_label = f"'{_sector}' 업종 {len(stat_dfs)}종목 풀"
+
+            # (패턴, 방향) 중복 제거 — 같은 조합이 5일 내 여러 번 떠도 통계는 동일
+            seen_keys: set = set()
+            main_rows, combo_rows = [], []
             for h_ in hits:
-                stat = (
-                    f"승률 {h_.win_rate * 100:.0f}% · 평균 {h_.avg_return:+.2f}% "
-                    f"(표본 {h_.n_past}회)"
-                    if h_.n_past > 0 else "과거 표본 없음"
-                )
-                rows.append({
-                    "날짜":   f"{h_.date:%Y-%m-%d}",
-                    "패턴":   h_.name,
-                    "유형":   h_.kind,
-                    "방향":   "🟢 강세" if h_.direction == "강세"
-                              else ("🔴 약세" if h_.direction == "약세" else "⚪ 중립"),
-                    f"과거 {horizon}일 후 성과": stat,
+                key = (h_.func, h_.sign)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+
+                stats = candle_patterns.full_stats(stat_dfs, h_.func, h_.sign, int(horizon))
+                base = stats["base"]
+                vd = candle_patterns.verdict(base, h_.sign)
+
+                main_rows.append({
+                    "날짜":     f"{h_.date:%Y-%m-%d}",
+                    "패턴":     h_.name,
+                    "방향":     "🟢 강세" if h_.sign > 0 else ("🔴 약세" if h_.sign < 0 else "⚪ 중립"),
+                    "표본":     base.n,
+                    "승률":     f"{base.win_rate * 100:.0f}%" if base.n else "—",
+                    f"평균 {horizon}일 수익": f"{base.avg_return:+.2f}%" if base.n else "—",
+                    "이항검정 p": f"{base.p_value:.3f}" if base.n else "—",
+                    "판정":     vd,
                 })
-            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
-            low_sample = [h_ for h_ in hits if 0 < h_.n_past < 10]
-            if low_sample:
-                st.caption(
-                    "⚠️ 표본 10회 미만인 패턴이 포함되어 있습니다 — 통계보다 캔들 맥락을 우선하세요."
-                )
+
+                def _cell(s_: candle_patterns.PatternStats) -> str:
+                    if s_.n == 0:
+                        return "—"
+                    return f"{s_.win_rate * 100:.0f}% ({s_.avg_return:+.1f}%, n={s_.n})"
+
+                combo_rows.append({
+                    "패턴":          f"{h_.name} ({h_.direction})",
+                    "거래량 동반":    _cell(stats["vol_hi"]),
+                    "거래량 미동반":  _cell(stats["vol_lo"]),
+                    "+ RSI 결합":    _cell(stats["rsi"]),
+                    "+ MACD 결합":   _cell(stats["macd"]),
+                })
+
+            def _color_verdict(val: str) -> str:
+                if val.startswith("➖"):
+                    return "color:#9E9E9E"
+                if val.startswith("✅"):
+                    return "color:#26a69a;font-weight:bold"
+                if val.startswith("❌"):
+                    return "color:#ef5350;font-weight:bold"
+                return "color:#FF9800"
+
+            st.caption(f"📊 집계 기준: **{pool_label}** · 수익률 측정 {horizon}일 후")
+            st.dataframe(
+                pd.DataFrame(main_rows).style.map(_color_verdict, subset=["판정"]),
+                width="stretch", hide_index=True,
+            )
+
+            st.markdown("**복합 신호 성과** — 조건 동시 충족 시 승률 (평균수익, 표본)")
+            st.dataframe(pd.DataFrame(combo_rows), width="stretch", hide_index=True)
+            st.caption(
+                f"거래량 동반 = Vol_Ratio ≥ {candle_patterns.VOL_ACCOMPANY} · "
+                f"RSI 결합 = 강세+RSI≤{candle_patterns.RSI_LOW} / 약세+RSI≥{candle_patterns.RSI_HIGH} · "
+                "MACD 결합 = 히스토그램 부호가 패턴 방향과 일치 · "
+                f"표본 {candle_patterns.MIN_SAMPLES}회 미만은 판단 불가"
+            )
 
 with st.expander("최근 가격 데이터"):
     display = df[["Open", "High", "Low", "Close", "Volume"]].tail(10).copy()
