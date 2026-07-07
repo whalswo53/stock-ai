@@ -7,6 +7,10 @@ from config.settings import (
     BB_PERIOD, BB_STD,
 )
 
+VOL_RATIO_WINDOW = 20   # 거래량 급증 판정용 평균 윈도우
+VOL_SPIKE_MULT = 2.0    # 평균 대비 이 배수 이상이면 급증
+VWAP_WINDOW = 20        # 롤링 VWAP 윈도우 (일봉이라 장중 VWAP 불가 → 롤링 근사)
+
 
 class TechnicalIndicators:
     """
@@ -37,6 +41,9 @@ class TechnicalIndicators:
         )
 
         out["OBV"] = self._obv(close, volume)
+
+        out["Vol_Ratio"] = self._vol_ratio(volume, VOL_RATIO_WINDOW)
+        out["VWAP"] = self._rolling_vwap(out, VWAP_WINDOW)
 
         return out
 
@@ -77,3 +84,17 @@ class TechnicalIndicators:
     def _obv(close: pd.Series, volume: pd.Series) -> pd.Series:
         direction = np.sign(close.diff()).fillna(0)
         return (direction * volume).cumsum()
+
+    @staticmethod
+    def _vol_ratio(volume: pd.Series, window: int) -> pd.Series:
+        """당일 거래량 ÷ 직전 window일 평균. VOL_SPIKE_MULT 이상 = 급증."""
+        avg = volume.shift(1).rolling(window, min_periods=window).mean()
+        return volume / avg.replace(0, np.nan)
+
+    @staticmethod
+    def _rolling_vwap(df: pd.DataFrame, window: int) -> pd.Series:
+        """롤링 VWAP: Σ(대표가격×거래량)/Σ(거래량), 대표가격=(H+L+C)/3."""
+        tp = (df["High"] + df["Low"] + df["Close"]) / 3
+        pv = (tp * df["Volume"]).rolling(window, min_periods=window).sum()
+        v = df["Volume"].rolling(window, min_periods=window).sum()
+        return pv / v.replace(0, np.nan)

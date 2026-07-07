@@ -572,6 +572,103 @@ def _yf_sector_for(ticker: str) -> str:
         return ''
 
 
+# ── Sector ETF constituents (K-means 페어 후보 보강) ──────────────────────────
+
+# GICS 섹터 → 대표 미국 섹터 ETF. 시드 industry에 semiconductor가 포함되면
+# SOXX(반도체 ETF)를 추가한다.
+_SECTOR_ETFS: dict[str, list[str]] = {
+    "Information Technology": ["XLK"],
+    "Financials":             ["XLF"],
+    "Health Care":            ["XLV"],
+    "Energy":                 ["XLE"],
+    "Consumer Discretionary": ["XLY"],
+    "Consumer Staples":       ["XLP"],
+    "Industrials":            ["XLI"],
+    "Materials":              ["XLB"],
+    "Utilities":              ["XLU"],
+    "Real Estate":            ["XLRE"],
+    "Communication Services": ["XLC"],
+}
+_SEMI_ETF = "SOXX"
+
+# 한국 섹터 ETF 상위 구성종목 — yfinance funds_data가 KODEX류 구성종목을
+# 지원하지 않아 정적 등록 (2026-07 기준 상위 종목, 변동 주기 느림).
+# 어차피 시드 섹터 필터를 한 번 더 거치므로 섹터 분류가 다른 종목이 섞여도
+# 자동으로 걸러진다.
+_KR_ETF_HOLDINGS: dict[str, dict[str, dict[str, str]]] = {
+    "Information Technology": {
+        "KODEX 반도체": {
+            "000660.KS": "SK하이닉스",
+            "005930.KS": "삼성전자",
+            "042700.KS": "한미반도체",
+            "000990.KS": "DB하이텍",
+            "058470.KQ": "리노공업",
+            "039030.KQ": "이오테크닉스",
+        },
+    },
+    "Financials": {
+        "KODEX 은행": {
+            "105560.KS": "KB금융",
+            "055550.KS": "신한지주",
+            "086790.KS": "하나금융지주",
+            "316140.KS": "우리금융지주",
+            "024110.KS": "기업은행",
+        },
+    },
+    "Industrials": {
+        "KODEX 2차전지산업": {
+            "373220.KS": "LG에너지솔루션",
+            "006400.KS": "삼성SDI",
+            "247540.KQ": "에코프로비엠",
+            "003670.KS": "포스코퓨처엠",
+            "096770.KS": "SK이노베이션",
+        },
+    },
+}
+
+
+@cache
+def _etf_top_holdings(etf: str) -> tuple[tuple[str, str], ...]:
+    """미국 ETF 상위 구성종목 ((ticker, name), ...) — yfinance funds_data.
+    실패 시 빈 튜플. @cache 호환을 위해 dict 대신 튜플 반환."""
+    import yfinance as yf
+    try:
+        th = yf.Ticker(etf).funds_data.top_holdings
+        time.sleep(0.3)
+        if th is None or th.empty:
+            return ()
+        return tuple(
+            (str(sym), str(row.get("Name", sym))) for sym, row in th.iterrows()
+        )
+    except Exception:
+        return ()
+
+
+def _sector_etf_candidates(
+    seed_gics: str, seed_industry: str,
+) -> tuple[dict[str, str], list[str]]:
+    """시드 섹터의 ETF 구성종목 {ticker: name}과 사용된 ETF 이름 목록."""
+    etfs = list(_SECTOR_ETFS.get(seed_gics, []))
+    if "semiconductor" in (seed_industry or "").lower() and _SEMI_ETF not in etfs:
+        etfs.append(_SEMI_ETF)
+
+    holdings: dict[str, str] = {}
+    used: list[str] = []
+    for etf in etfs:
+        rows = _etf_top_holdings(etf)
+        if rows:
+            used.append(etf)
+            for t, n in rows:
+                holdings.setdefault(t, n)
+
+    for etf_name, kr_holdings in _KR_ETF_HOLDINGS.get(seed_gics, {}).items():
+        used.append(etf_name)
+        for t, n in kr_holdings.items():
+            holdings.setdefault(t, n)
+
+    return holdings, used
+
+
 # ── Process-level cached listing loaders (re-fetched only on server restart) ──
 
 def _github_krx_csv(subpath: str) -> pd.DataFrame:
@@ -1051,6 +1148,8 @@ class KMeansPeerDiscovery:
     KOSPI 상위 universe_size개 + KOSDAQ 상위 universe_size개
     + S&P500 동일 섹터 전체 (GICS 컬럼 기반, API 호출 불필요)
     + INDUSTRY_GROUPS 등록 해외 종목
+    + 시드 섹터 ETF 상위 구성종목 (미국: XLK/SOXX 등 yfinance funds_data,
+      한국: KODEX 반도체 등 정적 등록 — _sector_etf_candidates 참고)
       (홍콩/중국/대만 등, 예: SMIC = 0981.HK)
     을 하나의 후보 풀로 합친 뒤, 시드 종목의 yfinance 업종(대분류, GICS
     스타일)과 같은 종목만 남깁니다. 반도체처럼 국가 구분 없는 글로벌
@@ -1123,11 +1222,12 @@ class KMeansPeerDiscovery:
     # ── Universe builder ─────────────────────────────────────────────────────
 
     def _build_universe_global(
-        self, ticker: str, seed_gics_sector: str,
-    ) -> tuple[list[str], dict[str, str], int]:
+        self, ticker: str, seed_gics_sector: str, seed_industry: str = "",
+    ) -> tuple[list[str], dict[str, str], int, list[str]]:
         """Combines KOSPI/KOSDAQ + S&P500 + INDUSTRY_GROUPS overseas tickers
-        into one candidate pool, regardless of the seed ticker's own market,
-        then keeps only candidates in the seed's broad sector.
+        + 섹터 ETF 상위 구성종목 into one candidate pool, regardless of the
+        seed ticker's own market, then keeps only candidates in the seed's
+        broad sector. Returns (universe, names, raw_pool_size, used_etfs).
 
         S&P500 candidates already carry a GICS 'Sector' column (free — no
         extra call). KOSPI/KOSDAQ/INDUSTRY_GROUPS candidates need a yfinance
@@ -1172,6 +1272,15 @@ class KMeansPeerDiscovery:
                     pool.append(t)
                     names[t] = n
 
+        # 섹터 ETF 상위 구성종목 (미국: yfinance funds_data / 한국: 정적 등록).
+        # S&P500 밖 종목(예: SOXX의 비S&P 구성종목)도 후보에 들어오며,
+        # 아래 섹터 필터를 똑같이 거친다.
+        etf_holdings, used_etfs = _sector_etf_candidates(seed_gics_sector, seed_industry)
+        for t, n in etf_holdings.items():
+            if t not in names:
+                pool.append(t)
+                names[t] = n
+
         raw_pool = list(dict.fromkeys(pool))  # de-dup, keep first occurrence order
 
         filtered = [ticker]
@@ -1186,7 +1295,7 @@ class KMeansPeerDiscovery:
 
         names.setdefault(ticker, ticker)
 
-        return filtered, names, len(raw_pool)
+        return filtered, names, len(raw_pool), used_etfs
 
     # ── Seed classification (display only — clustering itself is pool-wide) ──
 
@@ -1311,7 +1420,9 @@ class KMeansPeerDiscovery:
     ) -> PeerGroup:
         seed_gics = _YF_TO_GICS.get(seed_sector, seed_sector)
 
-        universe, name_map, raw_pool_size = self._build_universe_global(ticker, seed_gics)
+        universe, name_map, raw_pool_size, used_etfs = self._build_universe_global(
+            ticker, seed_gics, seed_industry,
+        )
 
         n_candidates = len(universe) - 1  # excluding the seed itself
         if n_candidates < self.MIN_SECTOR_CANDIDATES:
@@ -1360,8 +1471,9 @@ class KMeansPeerDiscovery:
                 f"K-means 클러스터링 · '{seed_gics}' 섹터 내 글로벌 통합 풀 "
                 "(국가/거래소 구분 없음, 업종은 yfinance sector로 1차 필터링) · "
                 f"KOSPI/KOSDAQ 상위 {self.universe_size}개 + "
-                f"S&P500 동일 섹터 전체 + INDUSTRY_GROUPS 해외 종목 중 "
-                "동일 섹터만 · 원화 종목은 일별 환율로 USD 환산 후 정규화 · "
+                f"S&P500 동일 섹터 전체 + INDUSTRY_GROUPS 해외 종목"
+                + (f" + 섹터 ETF 구성종목({', '.join(used_etfs)})" if used_etfs else "")
+                + " 중 동일 섹터만 · 원화 종목은 일별 환율로 USD 환산 후 정규화 · "
                 "⚠ 주가 움직임 기반 결과이므로 공적분 검정 결과를 함께 확인하세요"
             ),
             tickers=peers,

@@ -17,3 +17,5 @@ setuptools
 scikit-learn>=1.4.0
 supabase>=2.0.0
 beautifulsoup4>=4.12.0
+# 캔들 패턴 인식 (0.6.0+는 사전 빌드 wheel 제공 — 설치 실패해도 앱은 동작, 패턴 섹션만 비활성)
+ta-lib>=0.6.0
