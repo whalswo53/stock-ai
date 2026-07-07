@@ -34,6 +34,7 @@ from statsmodels.regression.linear_model import OLS
 from statsmodels.tools import add_constant
 from statsmodels.tsa.stattools import coint
 
+from analysis.quant.spread_diagnostics import copula_metrics, half_life, hurst_exponent
 from data.collectors.price_collector import PriceCollector
 
 
@@ -109,6 +110,13 @@ class PairScanResult:
     signal_a: str
     signal_b: str
     correlation: float = float("nan")   # daily-return Pearson correlation
+    hurst: float = float("nan")         # spread Hurst exponent (<0.5 = 평균회귀)
+    half_life_days: float = float("inf")  # spread OU half-life
+    # Copula enrichment (top candidates only — see enrich_with_copula)
+    kendall_tau: float = float("nan")
+    tail_dep_lower: float = float("nan")
+    tail_dep_upper: float = float("nan")
+    copula_family: str = ""
 
 
 # ── Static group scanner ──────────────────────────────────────────────────────
@@ -136,6 +144,9 @@ class PairScanner:
         alpha: float = 0.05,
         stop_loss_mult: float = 1.75,
         min_corr: float = 0.0,
+        max_hurst: float = 1.0,
+        max_half_life: float = 0.0,
+        distance_top_n: int = 0,
     ) -> None:
         self._collector = PriceCollector()
         self.period = period
@@ -148,6 +159,15 @@ class PairScanner:
         # Pairs below this are skipped before the (more expensive)
         # cointegration test. 0.0 disables the filter.
         self.min_corr = min_corr
+        # Spread quality gates (모두 스프레드 계산 후 적용):
+        #   max_hurst      — 스프레드 Hurst가 이 값 초과면 제외 (≥1.0 = 해제).
+        #                    0.5 미만 = 평균회귀 성향.
+        #   max_half_life  — OU 반감기가 이 값(일) 초과 또는 ∞면 제외 (≤0 = 해제).
+        self.max_hurst = max_hurst
+        self.max_half_life = max_half_life
+        # Distance method 사전 축소: 정규화 가격(시작=100) 유클리드 거리가
+        # 가장 가까운 상위 N쌍만 공적분 검정 (0 = 해제).
+        self.distance_top_n = distance_top_n
 
     # ── Public ────────────────────────────────────────────────────────────
 
@@ -261,6 +281,8 @@ class PairScanner:
                 "p-value":  round(r.pvalue, 4),
                 "공적분":   "✅" if r.is_cointegrated else "❌",
                 "상관계수": round(r.correlation, 3) if not np.isnan(r.correlation) else None,
+                "Hurst":    round(r.hurst, 3) if not np.isnan(r.hurst) else None,
+                "반감기(일)": round(r.half_life_days, 1) if np.isfinite(r.half_life_days) else None,
                 "헤지비율 β": round(r.hedge_ratio, 4),
                 "Z-score":  round(r.zscore_latest, 3),
                 "A 신호":   r.signal_a,
@@ -269,6 +291,35 @@ class PairScanner:
                 "_ticker_b": r.ticker_b,
             })
         return pd.DataFrame(rows)
+
+    def enrich_with_copula(
+        self,
+        results: list[PairScanResult],
+        prices: dict[str, pd.Series],
+        top_k: int = 10,
+    ) -> list[PairScanResult]:
+        """상위 top_k 후보(이미 p-value 오름차순)에만 Copula 의존성 지표를
+        채워 넣는다 (2차 필터용 — Kendall τ 역변환 닫힌형이라 저비용이지만
+        전 쌍에 돌릴 이유가 없어 상위 후보로 제한).
+
+        공적분·상관계수는 선형 관계만 보므로, 하방 꼬리 의존(Clayton)이
+        강한 쌍은 동반 급락 위험 공유 → 페어로 더 신뢰할 수 있다.
+        """
+        for r in results[:top_k]:
+            try:
+                cm = copula_metrics(prices[r.ticker_a], prices[r.ticker_b])
+                if cm is None:
+                    continue
+                r.kendall_tau = round(cm.kendall_tau, 3)
+                r.tail_dep_lower = round(cm.tail_dep_lower, 3)
+                r.tail_dep_upper = round(cm.tail_dep_upper, 3)
+                r.copula_family = (
+                    f"{cm.family} λ={cm.family_tail_dep:.2f}"
+                    if cm.family != "독립적" else cm.family
+                )
+            except Exception:
+                continue
+        return results
 
     # ── Internal ──────────────────────────────────────────────────────────
 
@@ -282,6 +333,8 @@ class PairScanner:
     ) -> list[PairScanResult]:
         if pairs is None:
             pairs = list(itertools.combinations(available, 2))
+        if self.distance_top_n > 0 and len(pairs) > self.distance_top_n:
+            pairs = self._closest_pairs_by_distance(pairs, prices)
         results: list[PairScanResult] = []
         for i, (ta, tb) in enumerate(pairs):
             if progress_cb:
@@ -292,6 +345,29 @@ class PairScanner:
                 results.append(result)
         results.sort(key=lambda r: r.pvalue)
         return results
+
+    def _closest_pairs_by_distance(
+        self,
+        pairs: list[tuple[str, str]],
+        prices: dict[str, pd.Series],
+    ) -> list[tuple[str, str]]:
+        """Distance method (Gatev et al.): 정규화 가격 간 평균 제곱 거리가
+        가장 작은 상위 distance_top_n쌍만 남긴다. 공적분 검정보다 훨씬 싸므로
+        1차 후보 축소용."""
+        scored: list[tuple[float, tuple[str, str]]] = []
+        for ta, tb in pairs:
+            try:
+                combined = pd.concat([prices[ta], prices[tb]], axis=1).dropna()
+                if len(combined) < self.MIN_COMMON_DAYS:
+                    continue
+                na = combined[ta] / float(combined[ta].iloc[0])
+                nb = combined[tb] / float(combined[tb].iloc[0])
+                # 평균 제곱 거리 (길이 차이에 영향받지 않도록 mean 사용)
+                scored.append((float(((na - nb) ** 2).mean()), (ta, tb)))
+            except Exception:
+                continue
+        scored.sort(key=lambda s: s[0])
+        return [p for _, p in scored[: self.distance_top_n]]
 
     def _analyze_pair(
         self,
@@ -320,6 +396,14 @@ class PairScanner:
             hedge_ratio = float(model.params[1])
             spread = pa - hedge_ratio * pb
 
+            # 스프레드 품질 게이트: 평균회귀 성향(Hurst)과 회귀 속도(반감기)
+            h = hurst_exponent(spread)
+            if self.max_hurst < 1.0 and (np.isnan(h) or h > self.max_hurst):
+                return None
+            hl = half_life(spread)
+            if self.max_half_life > 0 and not (hl <= self.max_half_life):
+                return None  # ∞(비회귀) 포함 제외
+
             w = self.zscore_window
             roll_mean = spread.rolling(w, min_periods=w).mean()
             roll_std  = spread.rolling(w, min_periods=w).std()
@@ -338,6 +422,8 @@ class PairScanner:
                 is_cointegrated=bool(pvalue < self.alpha),
                 hedge_ratio=round(hedge_ratio, 4),
                 correlation=round(ret_corr, 4) if not np.isnan(ret_corr) else float("nan"),
+                hurst=round(h, 3) if not np.isnan(h) else float("nan"),
+                half_life_days=round(hl, 1) if np.isfinite(hl) else float("inf"),
                 zscore_latest=round(z_now, 4) if not np.isnan(z_now) else float("nan"),
                 signal_a=signal_a,
                 signal_b=signal_b,

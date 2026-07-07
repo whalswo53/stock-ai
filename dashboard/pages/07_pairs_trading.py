@@ -15,6 +15,7 @@ from plotly.subplots import make_subplots
 
 from analysis.quant.aggregator import AggregatedPairResult, QuantAggregator
 from analysis.quant.mean_reversion import MeanReversionResult
+from analysis.quant.spread_diagnostics import fit_ou, half_life, hurst_exponent
 from analysis.quant.pair_scanner import (
     INDUSTRY_GROUPS,
     KMeansPeerDiscovery,
@@ -189,6 +190,29 @@ def _render_scan_results(
                 width="stretch", hide_index=True,
             )
 
+    # Copula 의존성 (enrich_with_copula가 상위 후보에만 채움)
+    cop_rows = [
+        {
+            "종목쌍":        f"{r.name_a} / {r.name_b}",
+            "Kendall τ":     r.kendall_tau,
+            "하방 꼬리의존": r.tail_dep_lower,
+            "상방 꼬리의존": r.tail_dep_upper,
+            "적합 Copula":   r.copula_family,
+        }
+        for r in scan_results
+        if r.copula_family and not math.isnan(r.kendall_tau)
+    ]
+    if cop_rows:
+        with st.expander(f"🧬 Copula 의존성 — 상위 {len(cop_rows)}쌍 (2차 필터)"):
+            st.caption(
+                "공적분·상관계수는 **선형** 관계만 봅니다. Copula 지표는 순위 기반이라 "
+                "비선형 의존성을 포착합니다.  \n"
+                "**하방 꼬리의존**(Clayton)이 높을수록 두 종목이 급락을 함께 겪는 관계 — "
+                "스프레드가 위기에도 유지될 가능성이 높아 페어로 더 신뢰할 수 있습니다. "
+                "꼬리의존이 0에 가까우면 평시에만 동행하는 쌍이니 주의하세요."
+            )
+            st.dataframe(pd.DataFrame(cop_rows), width="stretch", hide_index=True)
+
     selected_rows = event.selection.rows if event.selection else []
     if selected_rows:
         picked = scan_results[selected_rows[0]]
@@ -261,6 +285,33 @@ with st.sidebar:
     )
     min_dollar_volume = float(min_dv_musd) * 1_000_000
 
+    max_hurst = st.slider("최대 Hurst (스프레드 평균회귀성)", 0.30, 1.00, 0.50, 0.05,
+                           help=(
+                               "스프레드의 Hurst 지수가 이 값을 넘는 쌍은 제외합니다. "
+                               "0.5 미만 = 평균회귀 성향, 0.5 = 랜덤워크, 0.5 초과 = 추세 지속. "
+                               "1.0이면 필터 해제."
+                           ))
+    max_hl_days = st.select_slider(
+        "최대 반감기 (일)",
+        options=[0, 20, 40, 60, 90, 120],
+        value=60,
+        help=(
+            "스프레드의 OU 반감기(평균까지 절반 회귀에 걸리는 일수)가 이 값을 넘거나 "
+            "회귀하지 않는(∞) 쌍은 제외합니다. 너무 느린 회귀는 자본 회전에 불리합니다. "
+            "0이면 필터 해제."
+        ),
+    )
+    distance_top = st.select_slider(
+        "Distance 사전 축소 (상위 N쌍만 검정)",
+        options=[0, 10, 20, 50],
+        value=20,
+        help=(
+            "정규화 가격 곡선이 가장 비슷한(유클리드 거리 최소) 상위 N쌍만 "
+            "공적분 검정으로 넘깁니다 (Gatev distance method). "
+            "쌍 수가 N 이하면 영향 없음. 0이면 해제."
+        ),
+    )
+
     st.divider()
     st.subheader("칼만 필터")
     kalman_delta = st.select_slider(
@@ -314,8 +365,10 @@ def _run_dynamic_scan(
     tickers_tuple: tuple, names_json: str, period: str, window: int, ez: float, xz: float,
     seed_ticker: str = "", alpha: float = 0.05,
     stop_mult: float = 1.75, min_corr: float = 0.0, min_dollar_volume: float = 0.0,
+    max_hurst: float = 1.0, max_half_life: float = 0.0, distance_top_n: int = 0,
 ) -> tuple[list[PairScanResult], list[str]]:
-    """Returns (scan results, 거래대금 필터로 제외된 종목 라벨 목록)."""
+    """Returns (scan results, 거래대금 필터로 제외된 종목 라벨 목록).
+    상위 10쌍에는 Copula 의존성 지표(kendall_tau 등)가 함께 채워진다."""
     names        = json.loads(names_json)
     raw, dvols   = _fetch_peer_prices(tickers_tuple, period)
     prices       = _restore_prices(raw)
@@ -335,11 +388,13 @@ def _run_dynamic_scan(
     scanner = PairScanner(
         period=period, zscore_window=window, entry_z=ez, exit_z=xz, alpha=alpha,
         stop_loss_mult=stop_mult, min_corr=min_corr,
+        max_hurst=max_hurst, max_half_life=max_half_life, distance_top_n=distance_top_n,
     )
     results = scanner.scan_tickers(
         tickers, names, prices,
         seed_ticker=seed_ticker or None,
     )
+    scanner.enrich_with_copula(results, prices, top_k=10)
     return results, excluded
 
 
@@ -497,6 +552,7 @@ with tab_scan:
                             period, zscore_window, entry_z, exit_z,
                             seed_ticker, alpha,
                             stop_mult, min_corr, min_dollar_volume,
+                            max_hurst, float(max_hl_days), int(distance_top),
                         )
                         scan_error = None
                     except Exception as e:
@@ -512,7 +568,8 @@ with tab_scan:
                         )
                     st.warning(
                         "분석 가능한 쌍이 없습니다. 기간을 늘리거나 N을 높이거나, "
-                        f"사이드바의 상관계수(현재 ≥ {min_corr:.2f})·거래대금 필터를 완화해보세요."
+                        f"사이드바 필터를 완화해보세요 — 상관계수 ≥ {min_corr:.2f}, "
+                        f"Hurst ≤ {max_hurst:.2f}, 반감기 ≤ {max_hl_days if max_hl_days else '∞'}일."
                     )
                 else:
                     if vol_excluded:
@@ -867,6 +924,78 @@ with tab_direct:
                 f"**{label_a}** 가격이 상대적으로 너무 높고, **{label_b}** 가격이 너무 낮습니다.  \n"
                 f"→ **{label_a} 매도 + {label_b} 매수**를 동시에 진행하세요.  \n"
                 f"스프레드가 평균으로 돌아오면 두 포지션 합산 수익이 발생합니다."
+            )
+
+        # ── 섹션 5: 스프레드 진단 & OU 이론 임계값 ──────────────────────────
+        st.subheader("5. 스프레드 진단 & OU 이론 임계값")
+        with st.expander("❓ 이 지표들의 의미는?", expanded=False):
+            st.markdown(
+                "**Hurst 지수**: 스프레드가 평균으로 돌아오려는 성향. "
+                "0.5 미만 = 평균회귀(페어 트레이딩에 적합), 0.5 = 랜덤워크, 0.5 초과 = 추세 지속.  \n"
+                "**반감기**: 스프레드가 평균까지 절반 회귀하는 데 걸리는 예상 거래일. "
+                "짧을수록 자본 회전이 빠릅니다.  \n"
+                "**OU 프로세스**: 스프레드를 dX = θ(μ−X)dt + σdW 모형에 피팅해, "
+                "정상분포 표준편차(σ_eq) 기준 ±1σ_eq 이탈점을 현재 Z-score 스케일로 "
+                "환산한 **이론 진입 임계값**을 제안합니다 (근사 가이드)."
+            )
+
+        d_spread = ols.spread
+        d_hurst  = hurst_exponent(d_spread)
+        d_hl     = half_life(d_spread)
+        ou_fit   = fit_ou(d_spread, zscore_window)
+
+        dc1, dc2, dc3, dc4 = st.columns(4)
+        hurst_ok = math.isfinite(d_hurst) and d_hurst < 0.5
+        dc1.metric(
+            "Hurst 지수",
+            f"{d_hurst:.3f}" if math.isfinite(d_hurst) else "N/A",
+            "평균회귀 ✅" if hurst_ok else "추세성 ⚠️",
+            delta_color="normal" if hurst_ok else "inverse",
+        )
+        dc2.metric(
+            "반감기",
+            f"{d_hl:.1f}일" if math.isfinite(d_hl) else "∞ (비회귀)",
+            help="OU 반감기 — 스프레드가 평균까지 절반 회귀하는 예상 일수",
+        )
+        if ou_fit is not None:
+            dc3.metric("OU σ_eq (정상 σ)", f"{ou_fit.sigma_eq:.4f}",
+                       help=f"회귀 속도 θ={ou_fit.theta:.4f}/일 · 장기 평균 μ={ou_fit.mu:.4f}")
+            dc4.metric(
+                "이론 진입 Z 제안",
+                f"±{ou_fit.suggested_entry_z:.2f}σ"
+                if math.isfinite(ou_fit.suggested_entry_z) else "N/A",
+                help="±1 σ_eq 이탈점을 현재 롤링 Z-score 스케일로 환산한 값",
+            )
+        else:
+            dc3.metric("OU 피팅", "부적합 ❌",
+                       help="스프레드가 평균회귀 구조(0<φ<1)를 보이지 않아 OU 모형을 신뢰할 수 없습니다")
+            dc4.metric("이론 진입 Z 제안", "—")
+
+        diag_notes: list[str] = []
+        if not math.isfinite(d_hurst):
+            diag_notes.append("Hurst 계산 불가 — 데이터가 부족하거나 스프레드가 퇴화 상태입니다.")
+        elif d_hurst >= 0.5:
+            diag_notes.append(
+                f"Hurst {d_hurst:.2f} ≥ 0.5 — 스프레드에 추세성이 있어 평균회귀 전제가 약합니다."
+            )
+        if not math.isfinite(d_hl):
+            diag_notes.append("반감기 ∞ — 스프레드가 평균으로 돌아오는 통계적 증거가 없습니다.")
+        elif d_hl > 60:
+            diag_notes.append(f"반감기 {d_hl:.0f}일 — 회귀가 느려 포지션 보유 기간이 길어질 수 있습니다.")
+        if ou_fit is not None and math.isfinite(ou_fit.suggested_entry_z):
+            gap = ou_fit.suggested_entry_z - entry_z
+            if abs(gap) >= 0.4:
+                direction = "높게" if gap > 0 else "낮게"
+                diag_notes.append(
+                    f"OU 이론 진입점(±{ou_fit.suggested_entry_z:.2f}σ)이 현재 설정(±{entry_z:.1f}σ)보다 "
+                    f"{abs(gap):.1f}σ {direction} 나옵니다 — 사이드바 진입 Z-score 조정을 검토하세요."
+                )
+        if diag_notes:
+            st.warning("  \n".join(f"• {n}" for n in diag_notes))
+        else:
+            st.success(
+                "스프레드가 평균회귀 조건을 충족합니다 — Hurst < 0.5, 유한한 반감기, "
+                "OU 이론 진입점이 현재 설정과 부합합니다."
             )
 
         with st.expander("📋 신호 기준표"):
