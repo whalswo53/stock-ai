@@ -724,6 +724,111 @@ def _load_sp500_listing() -> pd.DataFrame:
 
 
 @cache
+def _load_nasdaq_listing() -> pd.DataFrame:
+    """Loads full NASDAQ listing (Symbol, Name, IndustryCode [TRBC], Industry[한글]).
+
+    ~3,900 rows, 시가총액 내림차순 정렬 — 소형주 industry 동종 스캔과
+    TRBC 코드 기반 섹터 추정에 사용."""
+    import FinanceDataReader as fdr
+    return fdr.StockListing('NASDAQ')
+
+
+# TRBC 경제 섹터 코드(IndustryCode 앞 2자리) → GICS 스타일 섹터명
+_TRBC_TO_GICS: dict[str, str] = {
+    "50": "Energy",
+    "51": "Materials",
+    "52": "Industrials",
+    "53": "Consumer Discretionary",
+    "54": "Consumer Staples",
+    "55": "Financials",
+    "56": "Health Care",
+    "57": "Information Technology",
+    "58": "Communication Services",
+    "59": "Utilities",
+    "60": "Real Estate",
+}
+
+# industry/사업요약 키워드 → GICS 섹터 (yfinance sector 부재 시 최후 추정)
+_SECTOR_HINT_KEYWORDS: list[tuple[str, str]] = [
+    ("semiconductor", "Information Technology"),
+    ("software", "Information Technology"),
+    ("computer", "Information Technology"),
+    ("hardware", "Information Technology"),
+    ("electronic", "Information Technology"),
+    ("aerospace", "Industrials"),
+    ("defense", "Industrials"),
+    ("drone", "Industrials"),
+    ("machinery", "Industrials"),
+    ("bank", "Financials"),
+    ("insurance", "Financials"),
+    ("financial", "Financials"),
+    ("pharma", "Health Care"),
+    ("biotech", "Health Care"),
+    ("medical", "Health Care"),
+    ("oil", "Energy"),
+    ("gas", "Energy"),
+    ("solar", "Energy"),
+    ("retail", "Consumer Discretionary"),
+    ("automotive", "Consumer Discretionary"),
+    ("telecom", "Communication Services"),
+    ("media", "Communication Services"),
+    ("real estate", "Real Estate"),
+    ("utility", "Utilities"),
+    ("mining", "Materials"),
+    ("chemical", "Materials"),
+]
+
+
+def _infer_sector(ticker: str, industry: str, summary: str) -> str:
+    """yfinance sector가 없을 때의 섹터 추정 (GICS 스타일 반환, 실패 시 '').
+
+    우선순위: NASDAQ 리스팅 TRBC 코드 → industry 키워드 → 사업요약 키워드.
+    """
+    if "." not in ticker:  # 미국 심볼만 NASDAQ 리스팅 조회
+        try:
+            nd = _load_nasdaq_listing()
+            row = nd[nd["Symbol"] == ticker.upper()]
+            if not row.empty:
+                code = str(row.iloc[0]["IndustryCode"])[:2]
+                gics = _TRBC_TO_GICS.get(code, "")
+                if gics:
+                    return gics
+        except Exception:
+            pass
+
+    text = f"{industry} {summary}".lower()
+    for kw, gics in _SECTOR_HINT_KEYWORDS:
+        if kw in text:
+            return gics
+    return ""
+
+
+def _industry_peers_nasdaq(ticker: str, top_n: int = 15) -> dict[str, str]:
+    """FDR NASDAQ 리스팅에서 시드와 같은 Industry의 종목 {ticker: name}.
+
+    리스팅이 시총 내림차순이므로 head(top_n)가 곧 시총 상위 동종이다.
+    S&P500 밖 소형주(RCAT 등)를 후보 풀에 자동 편입하는 용도 —
+    수동 INDUSTRY_GROUPS 등록을 대체한다. 시드가 리스팅에 없으면 {}."""
+    if "." in ticker:
+        return {}
+    try:
+        nd = _load_nasdaq_listing()
+        row = nd[nd["Symbol"] == ticker.upper()]
+        if row.empty:
+            return {}
+        ind = str(row.iloc[0]["Industry"])
+        if not ind or ind == "nan":
+            return {}
+        same = nd[nd["Industry"] == ind].head(top_n)
+        out = {str(r["Symbol"]): str(r["Name"]) for _, r in same.iterrows()}
+        # 시드가 시총 상위 top_n 밖이어도 항상 포함
+        out[str(row.iloc[0]["Symbol"])] = str(row.iloc[0]["Name"])
+        return out
+    except Exception:
+        return {}
+
+
+@cache
 def _load_krx_desc() -> pd.DataFrame:
     """Loads KRX-DESC listing (Code, Name, Market, Sector, Industry).
     Tries FDR first; falls back to GitHub direct fetch if data.krx.co.kr is blocked.
@@ -1187,25 +1292,29 @@ class KMeansPeerDiscovery:
 
     def find(self, ticker: str) -> PeerGroup:
         ticker = ticker.strip().upper()
-        seed_sector, seed_industry, _seed_name = self._seed_info(ticker)
+        seed_sector, seed_industry, _seed_name, seed_summary = self._seed_info(ticker)
+
+        sector_note = ""
+        if not seed_sector:
+            # Fallback 1: NASDAQ TRBC 코드 / industry / 사업요약 키워드로 추정
+            inferred = _infer_sector(ticker, seed_industry, seed_summary)
+            if inferred:
+                seed_sector = inferred
+                sector_note = " · 섹터 추정값 (yfinance sector 부재 → TRBC/키워드 기반)"
 
         if not seed_sector:
-            # No yfinance sector for the seed → nothing to safely filter by,
-            # so don't expose an unfiltered (potentially unrelated) cluster.
+            # Fallback 2: 정적 그룹 → 그것도 없으면 섹터 필터 없이 진행
+            # (완전 배제 대신 "섹터 미확인" 배지를 달고 노출한다)
             try:
                 return _static_group_peers(
                     ticker, self.top_n,
                     source_suffix=" (K-means 미지원: 업종 정보 부족 → 정적 폴백)",
                 )
             except Exception:
-                raise ValueError(
-                    f"'{ticker}'는 yfinance 업종(sector) 정보가 없어 K-means 클러스터링을 "
-                    "지원하지 않습니다 (업종 필터 없이는 결과를 신뢰할 수 없어 노출하지 "
-                    "않습니다). INDUSTRY_GROUPS 정적 종목군에도 등록되어 있지 않습니다."
-                )
+                sector_note = " · ⚠ 섹터 미확인 — 업종 필터 없이 군집화한 참고용 결과"
 
         try:
-            return self._find_global(ticker, seed_sector, seed_industry)
+            return self._find_global(ticker, seed_sector, seed_industry, sector_note)
         except Exception as primary_err:
             # Last-resort safety net: seed has no fetchable yfinance price
             # history, or too few same-sector candidates for a meaningful
@@ -1255,16 +1364,22 @@ class KMeansPeerDiscovery:
         # S&P500: the GICS Sector column is free (no per-ticker API call), so
         # instead of an arbitrary head() slice (the FDR listing is roughly
         # alphabetical, NOT market-cap ordered) we take every constituent in
-        # the seed's sector.
+        # the seed's sector. 섹터 미확인(seed_gics_sector='')이면 전 섹터를
+        # 넣을 수 없으므로 앞쪽 universe_size개로 제한해 풀 크기를 묶는다.
         sp500 = _load_sp500_listing()
+        sp_taken = 0
         for _, row in sp500.iterrows():
             sec = str(row['Sector'])
-            if seed_gics_sector and sec != seed_gics_sector:
-                continue
+            if seed_gics_sector:
+                if sec != seed_gics_sector:
+                    continue
+            elif sp_taken >= self.universe_size:
+                break
             t = str(row['Symbol'])
             pool.append(t)
             names[t] = str(row['Name'])
             sp500_gics[t] = sec
+            sp_taken += 1
 
         for gdata in INDUSTRY_GROUPS.values():
             for t, n in gdata.get('names', {}).items():
@@ -1281,35 +1396,64 @@ class KMeansPeerDiscovery:
                 pool.append(t)
                 names[t] = n
 
+        # NASDAQ 동종 industry 소형주 자동 편입: 시드가 S&P500 밖 종목이어도
+        # FDR NASDAQ 리스팅(시총순)의 같은 Industry 상위 종목을 후보에 넣는다.
+        # 시드와 같은 industry이므로 섹터도 같다고 보고 별도 yfinance 조회 없이
+        # 시드 섹터로 신뢰 처리한다 (INDUSTRY_GROUPS 수동 등록 대체).
+        industry_peers = _industry_peers_nasdaq(ticker, top_n=15)
+        for t, n in industry_peers.items():
+            if t not in names:
+                pool.append(t)
+                names[t] = n
+            sp500_gics.setdefault(t, seed_gics_sector)
+
         raw_pool = list(dict.fromkeys(pool))  # de-dup, keep first occurrence order
 
-        filtered = [ticker]
-        for t in raw_pool:
-            if t == ticker:
-                continue
-            gics = sp500_gics.get(t)
-            if gics is None:
-                gics = _yf_sector_for(t)
-            if gics and gics == seed_gics_sector:
-                filtered.append(t)
+        if not seed_gics_sector:
+            # 섹터 미확인 모드: 필터 불가 → 풀 전체로 군집화 (참고용 배지 필수)
+            filtered = [ticker] + [t for t in raw_pool if t != ticker]
+        else:
+            filtered = [ticker]
+            for t in raw_pool:
+                if t == ticker:
+                    continue
+                gics = sp500_gics.get(t)
+                if gics is None:
+                    gics = _yf_sector_for(t)
+                if gics and gics == seed_gics_sector:
+                    filtered.append(t)
 
         names.setdefault(ticker, ticker)
+
+        if industry_peers:
+            used_etfs = used_etfs + [f"NASDAQ 동종 industry {len(industry_peers)}종목"]
 
         return filtered, names, len(raw_pool), used_etfs
 
     # ── Seed classification (display only — clustering itself is pool-wide) ──
 
-    def _seed_info(self, ticker: str) -> tuple[str, str, str]:
+    def _seed_info(self, ticker: str) -> tuple[str, str, str, str]:
+        """Returns (sector, industry, name, business_summary).
+
+        yfinance .info는 레이트리밋으로 간헐 실패하므로 1회 재시도한다 —
+        이전에는 일시 실패가 sector=''로 둔갑해 시드가 통째로 배제됐다.
+        """
         import yfinance as yf
 
-        try:
-            info = yf.Ticker(ticker).info
-            sector = info.get('sector', '') or ''
-            industry = info.get('industry', '') or ''
-            name = info.get('shortName') or info.get('longName') or ticker
-            return sector, industry, name
-        except Exception:
-            return '', '', ticker
+        for attempt in range(2):
+            try:
+                info = yf.Ticker(ticker).info
+                sector = info.get('sector', '') or ''
+                industry = info.get('industry', '') or ''
+                name = info.get('shortName') or info.get('longName') or ticker
+                summary = info.get('longBusinessSummary', '') or ''
+                if sector or industry or summary:
+                    return sector, industry, name, summary
+            except Exception:
+                pass
+            if attempt == 0:
+                time.sleep(1.0)
+        return '', '', ticker, ''
 
     # ── Price download ─────────────────────────────────────────────────────────
 
@@ -1417,8 +1561,10 @@ class KMeansPeerDiscovery:
 
     def _find_global(
         self, ticker: str, seed_sector: str, seed_industry: str,
+        sector_note: str = "",
     ) -> PeerGroup:
         seed_gics = _YF_TO_GICS.get(seed_sector, seed_sector)
+        sector_label = seed_gics or "전체 (섹터 미확인)"
 
         universe, name_map, raw_pool_size, used_etfs = self._build_universe_global(
             ticker, seed_gics, seed_industry,
@@ -1427,7 +1573,7 @@ class KMeansPeerDiscovery:
         n_candidates = len(universe) - 1  # excluding the seed itself
         if n_candidates < self.MIN_SECTOR_CANDIDATES:
             raise ValueError(
-                f"'{seed_gics}' 섹터 내 같은 업종 후보가 부족합니다 "
+                f"'{sector_label}' 섹터 내 같은 업종 후보가 부족합니다 "
                 f"({n_candidates}개, 최소 {self.MIN_SECTOR_CANDIDATES}개 필요) — "
                 "업종이 다른 종목을 억지로 묶는 대신 폴백합니다."
             )
@@ -1442,7 +1588,7 @@ class KMeansPeerDiscovery:
             # window. An empty peer list isn't useful; let find() fall back
             # to the curated static group instead of showing "no peers".
             raise ValueError(
-                f"'{seed_gics}' 섹터 내에서도 '{ticker}'와 같은 가격 움직임 군집을 "
+                f"'{sector_label}' 섹터 내에서도 '{ticker}'와 같은 가격 움직임 군집을 "
                 f"찾지 못했습니다 (K={opt_k} 중 단독 클러스터)."
             )
 
@@ -1459,22 +1605,23 @@ class KMeansPeerDiscovery:
 
         return PeerGroup(
             seed_ticker=ticker,
-            sector=seed_sector or "K-means 클러스터",
+            sector=seed_sector or "섹터 미확인",
             industry=(
                 seed_industry + " · " if seed_industry else ""
             ) + (
                 f"클러스터 크기 {cluster_size}개 "
-                f"(K={opt_k}, {seed_gics} 섹터 후보 {len(close.columns)}개 / "
+                f"(K={opt_k}, {sector_label} 섹터 후보 {len(close.columns)}개 / "
                 f"전체 풀 {raw_pool_size}개 중 필터링)"
             ),
             source=(
-                f"K-means 클러스터링 · '{seed_gics}' 섹터 내 글로벌 통합 풀 "
+                f"K-means 클러스터링 · '{sector_label}' 섹터 내 글로벌 통합 풀 "
                 "(국가/거래소 구분 없음, 업종은 yfinance sector로 1차 필터링) · "
                 f"KOSPI/KOSDAQ 상위 {self.universe_size}개 + "
                 f"S&P500 동일 섹터 전체 + INDUSTRY_GROUPS 해외 종목"
                 + (f" + 섹터 ETF 구성종목({', '.join(used_etfs)})" if used_etfs else "")
                 + " 중 동일 섹터만 · 원화 종목은 일별 환율로 USD 환산 후 정규화 · "
                 "⚠ 주가 움직임 기반 결과이므로 공적분 검정 결과를 함께 확인하세요"
+                + sector_note
             ),
             tickers=peers,
             names=names,
