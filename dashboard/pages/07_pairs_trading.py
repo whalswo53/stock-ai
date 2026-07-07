@@ -147,6 +147,8 @@ def _style_scan(df: pd.DataFrame, alpha: float = 0.05) -> pd.DataFrame:
                 styles.loc[i, col] = "color:#ef5350;font-weight:bold"
             elif sig == "CLOSE":
                 styles.loc[i, col] = "color:#FF9800"
+            elif sig == "STOP_LOSS":
+                styles.loc[i, col] = "color:#ab47bc;font-weight:bold"
     return styles
 
 
@@ -233,6 +235,31 @@ with st.sidebar:
                                help="절대값이 이 값 미만이면 청산 신호가 발생합니다")
     zscore_window = st.slider("Z-score 윈도우 (일)", 10, 60, 30, 5,
                                help="Z-score 계산에 사용할 롤링 기간")
+    stop_mult     = st.slider("손절 배수 (진입 Z × 배수)", 1.2, 3.0, 1.75, 0.05,
+                               help=(
+                                   "|Z|가 진입 임계값 × 이 배수 이상으로 벌어지면 "
+                                   "공적분 붕괴로 판단하고 STOP_LOSS(강제 청산) 신호를 냅니다. "
+                                   "권장 범위 1.5~2.0"
+                               ))
+    st.caption(f"→ 손절선: |Z| ≥ **{entry_z * stop_mult:.2f}σ** 에서 강제 청산")
+
+    st.divider()
+    st.subheader("페어 후보 필터 (자동 스캔)")
+    min_corr = st.slider("최소 수익률 상관계수", 0.0, 0.95, 0.35, 0.05,
+                          help=(
+                              "일별 수익률 피어슨 상관계수가 이 값 미만인 쌍은 "
+                              "공적분 검정 전에 제외합니다. 0이면 필터 해제."
+                          ))
+    min_dv_musd = st.select_slider(
+        "최소 일평균 거래대금 (백만 USD)",
+        options=[0, 1, 5, 10, 50, 100],
+        value=1,
+        help=(
+            "최근 60거래일 평균 거래대금(종가×거래량)이 이 값 미만인 종목은 "
+            "후보에서 제외합니다. 원화 종목은 USD 환산 기준. 0이면 필터 해제."
+        ),
+    )
+    min_dollar_volume = float(min_dv_musd) * 1_000_000
 
     st.divider()
     st.subheader("칼만 필터")
@@ -265,41 +292,62 @@ def _restore_prices(raw: dict[str, list]) -> dict[str, pd.Series]:
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def _discover_peers(seed_ticker: str, top_n: int, method: str = "sector") -> tuple:
+def _discover_peers(
+    seed_ticker: str, top_n: int, method: str = "sector", universe_size: int = 40,
+) -> tuple:
     if method == "kmeans":
-        pg = KMeansPeerDiscovery(top_n=top_n).find(seed_ticker)
+        pg = KMeansPeerDiscovery(top_n=top_n, universe_size=universe_size).find(seed_ticker)
     else:
         pg = PeerDiscovery(top_n=top_n, scan_depth=80).find(seed_ticker)
     return (pg.tickers, json.dumps(pg.names, ensure_ascii=False), pg.sector, pg.industry, pg.source)
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def _fetch_peer_prices(tickers_tuple: tuple, period: str) -> dict[str, list]:
+def _fetch_peer_prices(tickers_tuple: tuple, period: str) -> tuple[dict[str, list], dict[str, float]]:
     scanner = PairScanner(period=period)
-    prices  = scanner.fetch_prices_for(list(tickers_tuple))
-    return _align_and_serialize(prices)
+    prices, dollar_volumes = scanner.fetch_market_data_for(list(tickers_tuple))
+    return _align_and_serialize(prices), dollar_volumes
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def _run_dynamic_scan(
     tickers_tuple: tuple, names_json: str, period: str, window: int, ez: float, xz: float,
     seed_ticker: str = "", alpha: float = 0.05,
-) -> list[PairScanResult]:
-    names   = json.loads(names_json)
-    raw     = _fetch_peer_prices(tickers_tuple, period)
-    prices  = _restore_prices(raw)
-    scanner = PairScanner(period=period, zscore_window=window, entry_z=ez, exit_z=xz, alpha=alpha)
-    return scanner.scan_tickers(
-        list(tickers_tuple), names, prices,
+    stop_mult: float = 1.75, min_corr: float = 0.0, min_dollar_volume: float = 0.0,
+) -> tuple[list[PairScanResult], list[str]]:
+    """Returns (scan results, 거래대금 필터로 제외된 종목 라벨 목록)."""
+    names        = json.loads(names_json)
+    raw, dvols   = _fetch_peer_prices(tickers_tuple, period)
+    prices       = _restore_prices(raw)
+
+    # 유동성 필터: 시드는 항상 유지, 나머지는 일평균 거래대금(USD) 기준 제외
+    excluded: list[str] = []
+    tickers = list(tickers_tuple)
+    if min_dollar_volume > 0:
+        kept = []
+        for t in tickers:
+            if t == seed_ticker or dvols.get(t, 0.0) >= min_dollar_volume:
+                kept.append(t)
+            else:
+                excluded.append(f"{names.get(t, t)} (${dvols.get(t, 0.0) / 1e6:.1f}M)")
+        tickers = kept
+
+    scanner = PairScanner(
+        period=period, zscore_window=window, entry_z=ez, exit_z=xz, alpha=alpha,
+        stop_loss_mult=stop_mult, min_corr=min_corr,
+    )
+    results = scanner.scan_tickers(
+        tickers, names, prices,
         seed_ticker=seed_ticker or None,
     )
+    return results, excluded
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def _run_pair(ta, tb, period, window, ez, xz, delta, alpha=0.05) -> AggregatedPairResult:
+def _run_pair(ta, tb, period, window, ez, xz, delta, alpha=0.05, stop_mult=1.75) -> AggregatedPairResult:
     return QuantAggregator(
         period=period, zscore_window=window, entry_z=ez, exit_z=xz, kalman_delta=delta,
-        alpha=alpha,
+        alpha=alpha, stop_loss_mult=stop_mult,
     ).run_pair(ta, tb)
 
 
@@ -364,7 +412,18 @@ with tab_scan:
     )
     disc_method_key = "kmeans" if "K-means" in disc_method else "sector"
 
+    kmeans_universe = 40
     if disc_method_key == "kmeans":
+        kmeans_universe = st.slider(
+            "K-means 한국 유니버스 크기 (KOSPI·KOSDAQ 각 상위 N)",
+            min_value=20, max_value=100, value=40, step=10,
+            help=(
+                "KOSPI/KOSDAQ 각각 시가총액 상위 N개를 글로벌 후보 풀에 넣습니다. "
+                "미국은 S&P500 동일 섹터 전체가 자동 포함됩니다. "
+                "⚠ 한국 종목은 업종 확인에 yfinance 조회(종목당 ~0.3초)가 필요해 "
+                "값을 키우면 최초 실행이 그만큼 느려집니다 (조회 결과는 서버 재시작 전까지 캐시)."
+            ),
+        )
         st.warning(
             "⚠️ 주가 움직임 기반 클러스터링은 같은 업종(대분류)으로 1차 필터링은 하지만, "
             "그 안에서도 업종과 무관하게 나올 수 있습니다. **반드시 아래 공적분 검정 결과를 "
@@ -396,7 +455,7 @@ with tab_scan:
             resolved_name = _get_name(seed_ticker)
             st.caption(f"→ **{resolved_name}** ({seed_ticker}) 로 인식됨")
 
-        disc_key = (seed_ticker, peer_top_n, disc_method_key)
+        disc_key = (seed_ticker, peer_top_n, disc_method_key, kmeans_universe)
         if run_discovery or st.session_state.get("last_disc_key") == disc_key:
             st.session_state["last_disc_key"] = disc_key
 
@@ -408,7 +467,7 @@ with tab_scan:
             with st.spinner(spinner_msg):
                 try:
                     tickers_list, names_json, sector, industry, source = _discover_peers(
-                        seed_ticker, peer_top_n, disc_method_key
+                        seed_ticker, peer_top_n, disc_method_key, kmeans_universe
                     )
                     disc_error = None
                 except (ValueError, RuntimeError) as e:
@@ -433,10 +492,11 @@ with tab_scan:
 
                 with st.spinner(f"{n_discovered}개 종목, {n_pairs_dyn}쌍 공적분 검정 중…"):
                     try:
-                        scan_results = _run_dynamic_scan(
+                        scan_results, vol_excluded = _run_dynamic_scan(
                             tuple(tickers_list), names_json,
                             period, zscore_window, entry_z, exit_z,
                             seed_ticker, alpha,
+                            stop_mult, min_corr, min_dollar_volume,
                         )
                         scan_error = None
                     except Exception as e:
@@ -445,8 +505,21 @@ with tab_scan:
                 if scan_error:
                     st.error(f"스캔 오류: {scan_error}")
                 elif not scan_results:
-                    st.warning("분석 가능한 쌍이 없습니다. 기간을 늘리거나 N을 높여보세요.")
+                    if vol_excluded:
+                        st.caption(
+                            f"💧 거래대금 필터(≥ ${min_dollar_volume / 1e6:.0f}M/일)로 "
+                            f"{len(vol_excluded)}개 종목 제외: " + " · ".join(vol_excluded)
+                        )
+                    st.warning(
+                        "분석 가능한 쌍이 없습니다. 기간을 늘리거나 N을 높이거나, "
+                        f"사이드바의 상관계수(현재 ≥ {min_corr:.2f})·거래대금 필터를 완화해보세요."
+                    )
                 else:
+                    if vol_excluded:
+                        st.caption(
+                            f"💧 거래대금 필터(≥ ${min_dollar_volume / 1e6:.0f}M/일)로 "
+                            f"{len(vol_excluded)}개 종목 제외: " + " · ".join(vol_excluded)
+                        )
                     _render_scan_results(
                         scan_results, source_note=source, df_key="scan_df_dynamic",
                         alpha=alpha,
@@ -562,7 +635,7 @@ with tab_direct:
             try:
                 result: AggregatedPairResult = _run_pair(
                     ticker_a, ticker_b, period, zscore_window, entry_z, exit_z, kalman_delta,
-                    direct_alpha,
+                    direct_alpha, stop_mult,
                 )
                 error_msg = None
             except ValueError as e:
@@ -681,7 +754,7 @@ with tab_direct:
         # ── 섹션 3: 차트 ─────────────────────────────────────────────────────
         st.subheader("3. 가격·스프레드·Z-score 비교")
 
-        def build_pair_chart(ols_sr, kalman_sr, la, lb, entry_z, exit_z) -> go.Figure:
+        def build_pair_chart(ols_sr, kalman_sr, la, lb, entry_z, exit_z, stop_z) -> go.Figure:
             dates = ols_sr.dates
             fig = make_subplots(
                 rows=4, cols=1, shared_xaxes=True,
@@ -716,6 +789,8 @@ with tab_direct:
                     line=dict(color=color, width=1.6), showlegend=False,
                 ), row=row_idx, col=1)
                 for level, lcolor, dash in [
+                    ( stop_z,  "rgba(171,71,188,0.65)", "dashdot"),
+                    (-stop_z,  "rgba(171,71,188,0.65)", "dashdot"),
                     ( entry_z, "rgba(239,83,80,0.55)",  "dash"),
                     (-entry_z, "rgba(38,166,154,0.55)", "dash"),
                     ( exit_z,  "rgba(255,152,0,0.40)",  "dot"),
@@ -738,7 +813,8 @@ with tab_direct:
             return fig
 
         st.plotly_chart(
-            build_pair_chart(ols, kalman, label_a, label_b, entry_z, exit_z),
+            build_pair_chart(ols, kalman, label_a, label_b, entry_z, exit_z,
+                             entry_z * stop_mult),
             width="stretch",
         )
 
@@ -760,7 +836,15 @@ with tab_direct:
 
         sig = result.signal_a
         z   = result.composite_zscore
-        if sig == "WAIT":
+        if sig == "STOP_LOSS":
+            st.error(
+                f"🚨 **강제 청산 (Stop-loss)** (Z = {z:+.2f}σ, 손절선 ±{entry_z * stop_mult:.2f}σ)  \n"
+                f"스프레드가 진입 임계값({entry_z:.1f}σ)의 {stop_mult:.2f}배 이상 벌어졌습니다.  \n"
+                f"**공적분 관계가 붕괴됐을 가능성이 높습니다** — 평균 회귀를 기대하고 버티는 대신 "
+                f"보유 중인 양쪽 포지션을 **즉시 청산**해 손실을 제한하세요.  \n"
+                f"신규 진입도 금지입니다. 관계가 회복됐는지는 공적분 검정을 다시 확인한 후 판단하세요."
+            )
+        elif sig == "WAIT":
             st.info(
                 f"**현재 관망** — 두 종목의 가격 차이가 평소 범위(|Z| < {entry_z}σ) 안에 있습니다.  \n"
                 "진입 조건이 충족되지 않았습니다. 포지션 없이 기다리세요."
@@ -789,6 +873,7 @@ with tab_direct:
             st.markdown(
                 f"| 앙상블 Z | {label_a} | {label_b} | 의미 |\n"
                 f"|---|---|---|---|\n"
+                f"| \\|Z\\| ≥ {entry_z * stop_mult:.2f} ({entry_z}×{stop_mult:.2f}) | STOP_LOSS (강제 청산) | STOP_LOSS (강제 청산) | 공적분 붕괴 의심 · 손실 제한 |\n"
                 f"| Z > +{entry_z} | SELL (매도) | BUY (매수) | A 고평가 · B 저평가 |\n"
                 f"| Z < −{entry_z} | BUY (매수) | SELL (매도) | A 저평가 · B 고평가 |\n"
                 f"| \\|Z\\| < {exit_z} | CLOSE (청산) | CLOSE (청산) | 스프레드 정상화 |\n"
@@ -814,6 +899,8 @@ with tab_direct:
                     v = float(val)
                 except (TypeError, ValueError):
                     return ""
+                if abs(v) >= entry_z * stop_mult:
+                    return "color:#ab47bc;font-weight:bold"
                 if v > entry_z:     return "color:#ef5350;font-weight:bold"
                 if v < -entry_z:    return "color:#26a69a;font-weight:bold"
                 if abs(v) < exit_z: return "color:#FF9800"

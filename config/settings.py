@@ -11,6 +11,8 @@ PORTFOLIO_DIR = STORAGE_DIR / "portfolio"
 
 ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
 NEWS_API_KEY: str = os.getenv("NEWS_API_KEY", "")
+# Finnhub 무료 티어: 미국주식 REST /quote 실시간, 60 req/min (https://finnhub.io)
+FINNHUB_API_KEY: str = os.getenv("FINNHUB_API_KEY", "")
 
 # Yahoo Finance suffix by market
 MARKET_SUFFIX: dict[str, str] = {

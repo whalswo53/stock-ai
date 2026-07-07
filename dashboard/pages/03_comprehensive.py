@@ -96,6 +96,7 @@ _PAIR_ZSCORE_WINDOW = 30
 _PAIR_ENTRY_Z = 2.0
 _PAIR_EXIT_Z = 0.5
 _PAIR_KALMAN_DELTA = 1e-4
+_PAIR_STOP_MULT = 1.75  # |Z| ≥ entry_z × mult → STOP_LOSS (공적분 붕괴 의심)
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -137,6 +138,7 @@ def _run_pair_aggregate(ticker: str, peer: str, alpha: float):
         period=_PAIR_PERIOD, zscore_window=_PAIR_ZSCORE_WINDOW,
         entry_z=_PAIR_ENTRY_Z, exit_z=_PAIR_EXIT_Z,
         kalman_delta=_PAIR_KALMAN_DELTA, alpha=alpha,
+        stop_loss_mult=_PAIR_STOP_MULT,
     ).run_pair(ticker, peer)
 
 
@@ -347,8 +349,10 @@ if pair_info:
     z      = agg.composite_zscore
     signal = agg.signal_a
 
-    sig_color = {"BUY": "#26a69a", "SELL": "#ef5350", "CLOSE": "#FF9800"}.get(signal, "#9E9E9E")
-    sig_rgb   = {"BUY": "38,166,154", "SELL": "239,83,80", "CLOSE": "255,152,0"}.get(signal, "100,100,100")
+    sig_color = {"BUY": "#26a69a", "SELL": "#ef5350", "CLOSE": "#FF9800",
+                 "STOP_LOSS": "#ab47bc"}.get(signal, "#9E9E9E")
+    sig_rgb   = {"BUY": "38,166,154", "SELL": "239,83,80", "CLOSE": "255,152,0",
+                 "STOP_LOSS": "171,71,188"}.get(signal, "100,100,100")
 
     pc1, pc2, pc3, pc4 = st.columns([1, 1, 1, 2])
     pc1.metric("비교 종목", pair_info["peer_name"], pair_info["peer"])

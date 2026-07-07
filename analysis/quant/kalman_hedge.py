@@ -54,6 +54,7 @@ class KalmanHedge:
         entry_z: float = 2.0,
         exit_z: float = 0.5,
         delta: float = 1e-4,
+        stop_loss_mult: float = 1.75,
     ) -> None:
         self._collector = PriceCollector()
         self.period = period
@@ -61,6 +62,7 @@ class KalmanHedge:
         self.entry_z = entry_z
         self.exit_z = exit_z
         self.delta = delta
+        self.stop_loss_mult = stop_loss_mult
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -126,6 +128,17 @@ class KalmanHedge:
         ticker_a = str(result.price_a.name)
         ticker_b = str(result.price_b.name)
 
+        stop_z = self.entry_z * self.stop_loss_mult
+        if abs(z_now) >= stop_z:
+            return PairSignal(
+                zscore_latest=z_now,
+                signal_a="STOP_LOSS",
+                signal_b="STOP_LOSS",
+                label=(
+                    f"공적분 붕괴 의심 (Z={z_now:.2f}, 손절선 ±{stop_z:.2f}) — "
+                    f"보유 포지션 강제 청산 권고"
+                ),
+            )
         if z_now > self.entry_z:
             return PairSignal(
                 zscore_latest=z_now,

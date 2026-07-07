@@ -79,6 +79,13 @@ def load_info(ticker: str) -> dict:
     return PriceCollector().get_info(ticker)
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def load_quote(ticker: str):
+    """미국 종목 실시간(Finnhub)/지연(yfinance) 시세. 60초 캐시."""
+    from data.collectors.realtime_quote import get_quote
+    return get_quote(ticker)
+
+
 with st.spinner(f"'{ticker}' 데이터 불러오는 중…"):
     df = load_ohlcv(ticker, period)
     info = load_info(ticker)
@@ -96,6 +103,12 @@ last = df.iloc[-1]
 prev = df.iloc[-2] if len(df) > 1 else last
 
 last_close = last["Close"]
+
+# 미국 종목: 실시간(Finnhub) 또는 최신 체결가로 현재가 갱신 + 지연 배지
+quote = None if kr else load_quote(ticker)
+if quote and quote.price:
+    last_close = float(quote.price)
+
 change_abs = last_close - prev["Close"]
 change_pct = (change_abs / prev["Close"]) * 100
 volume_today = last["Volume"]
@@ -126,6 +139,12 @@ m4.metric(
     "기간 고가 / 저가",
     f"{fmt_price(period_high)} / {fmt_price(period_low)}",
 )
+
+if quote is not None:
+    from data.collectors.realtime_quote import badge_text
+    _badge = badge_text(quote)
+    if _badge:
+        st.caption(_badge)
 
 
 # ── Chart builder ─────────────────────────────────────────────────────────────

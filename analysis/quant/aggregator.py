@@ -72,9 +72,11 @@ class QuantAggregator:
         exit_z: float = 0.5,
         kalman_delta: float = 1e-4,
         alpha: float = 0.05,
+        stop_loss_mult: float = 1.75,
     ) -> None:
         self.entry_z = entry_z
         self.exit_z  = exit_z
+        self.stop_loss_mult = stop_loss_mult
 
         self._ols = PairsTrading(
             period=period,
@@ -82,6 +84,7 @@ class QuantAggregator:
             entry_z=entry_z,
             exit_z=exit_z,
             alpha=alpha,
+            stop_loss_mult=stop_loss_mult,
         )
         self._kalman = KalmanHedge(
             period=period,
@@ -89,6 +92,7 @@ class QuantAggregator:
             entry_z=entry_z,
             exit_z=exit_z,
             delta=kalman_delta,
+            stop_loss_mult=stop_loss_mult,
         )
         self._mr = MeanReversionAnalyzer(
             period=period,
@@ -186,6 +190,10 @@ class QuantAggregator:
     def _classify_pair(self, z: float, ticker_a: str, ticker_b: str) -> PairSignal:
         if np.isnan(z):
             return PairSignal(float("nan"), "WAIT", "WAIT", "Z-score 계산 불가")
+        stop_z = self.entry_z * self.stop_loss_mult
+        if abs(z) >= stop_z:
+            return PairSignal(z, "STOP_LOSS", "STOP_LOSS",
+                f"공적분 붕괴 의심 (Z={z:.2f}, 손절선 ±{stop_z:.2f}) — 보유 포지션 강제 청산 권고")
         if z > self.entry_z:
             return PairSignal(z, "SELL", "BUY",
                 f"스프레드 과대 (Z={z:.2f}) — {ticker_a} SELL / {ticker_b} BUY")

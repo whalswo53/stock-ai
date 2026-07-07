@@ -108,6 +108,7 @@ class PairScanResult:
     zscore_latest: float
     signal_a: str
     signal_b: str
+    correlation: float = float("nan")   # daily-return Pearson correlation
 
 
 # ── Static group scanner ──────────────────────────────────────────────────────
@@ -133,6 +134,8 @@ class PairScanner:
         entry_z: float = 2.0,
         exit_z: float = 0.5,
         alpha: float = 0.05,
+        stop_loss_mult: float = 1.75,
+        min_corr: float = 0.0,
     ) -> None:
         self._collector = PriceCollector()
         self.period = period
@@ -140,6 +143,11 @@ class PairScanner:
         self.entry_z = entry_z
         self.exit_z = exit_z
         self.alpha = alpha
+        self.stop_loss_mult = stop_loss_mult
+        # Minimum daily-return correlation between the two legs.
+        # Pairs below this are skipped before the (more expensive)
+        # cointegration test. 0.0 disables the filter.
+        self.min_corr = min_corr
 
     # ── Public ────────────────────────────────────────────────────────────
 
@@ -164,17 +172,54 @@ class PairScanner:
         progress_cb: Optional[Callable[[float, str], None]] = None,
     ) -> dict[str, pd.Series]:
         """Fetches prices for an arbitrary ticker list (for dynamic peers)."""
+        prices, _ = self.fetch_market_data_for(tickers, progress_cb)
+        return prices
+
+    def fetch_market_data_for(
+        self,
+        tickers: list[str],
+        progress_cb: Optional[Callable[[float, str], None]] = None,
+    ) -> tuple[dict[str, pd.Series], dict[str, float]]:
+        """Fetches Close prices + average daily dollar volume (USD) per ticker.
+
+        Dollar volume = mean(Close × Volume) over the last 60 trading days.
+        KRW-denominated tickers (.KS/.KQ) are converted to USD with the
+        latest KRW=X rate so a single liquidity threshold works across
+        markets.
+        """
         prices: dict[str, pd.Series] = {}
+        dollar_volumes: dict[str, float] = {}
+        usdkrw: Optional[float] = None
+
         for i, ticker in enumerate(tickers):
             if progress_cb:
                 progress_cb(i / len(tickers), f"{ticker} 가격 수집 중…")
             try:
                 df = self._collector.fetch(ticker, period=self.period)
-                if not df.empty and len(df) >= self.MIN_COMMON_DAYS:
-                    prices[ticker] = df["Close"].dropna().rename(ticker)
+                if df.empty or len(df) < self.MIN_COMMON_DAYS:
+                    continue
+                prices[ticker] = df["Close"].dropna().rename(ticker)
+
+                dv = float((df["Close"] * df["Volume"]).tail(60).mean())
+                if ticker.upper().endswith((".KS", ".KQ")):
+                    if usdkrw is None:
+                        usdkrw = self._fetch_usdkrw()
+                    dv /= usdkrw
+                dollar_volumes[ticker] = dv
             except Exception:
                 pass
-        return prices
+        return prices, dollar_volumes
+
+    def _fetch_usdkrw(self) -> float:
+        """Latest USD/KRW rate; conservative fallback if the fetch fails."""
+        try:
+            fx = self._collector.fetch("KRW=X", period="5d")
+            rate = float(fx["Close"].dropna().iloc[-1])
+            if rate > 0:
+                return rate
+        except Exception:
+            pass
+        return 1350.0
 
     def scan(
         self,
@@ -215,6 +260,7 @@ class PairScanner:
                 "종목 B":   f"{r.name_b} ({r.ticker_b})",
                 "p-value":  round(r.pvalue, 4),
                 "공적분":   "✅" if r.is_cointegrated else "❌",
+                "상관계수": round(r.correlation, 3) if not np.isnan(r.correlation) else None,
                 "헤지비율 β": round(r.hedge_ratio, 4),
                 "Z-score":  round(r.zscore_latest, 3),
                 "A 신호":   r.signal_a,
@@ -261,6 +307,13 @@ class PairScanner:
 
             pa, pb = combined[ta], combined[tb]
 
+            # Daily-return correlation gate: cheap pre-filter that removes
+            # pairs that merely trended together (price-level correlation
+            # alone is inflated by common trends).
+            ret_corr = float(pa.pct_change().corr(pb.pct_change()))
+            if self.min_corr > 0 and (np.isnan(ret_corr) or ret_corr < self.min_corr):
+                return None
+
             _, pvalue, _ = coint(pa.values, pb.values)
 
             model = OLS(pa.values, add_constant(pb.values)).fit()
@@ -284,6 +337,7 @@ class PairScanner:
                 pvalue=float(pvalue),
                 is_cointegrated=bool(pvalue < self.alpha),
                 hedge_ratio=round(hedge_ratio, 4),
+                correlation=round(ret_corr, 4) if not np.isnan(ret_corr) else float("nan"),
                 zscore_latest=round(z_now, 4) if not np.isnan(z_now) else float("nan"),
                 signal_a=signal_a,
                 signal_b=signal_b,
@@ -294,6 +348,8 @@ class PairScanner:
     def _classify(self, z: float) -> tuple[str, str]:
         if np.isnan(z):
             return "WAIT", "WAIT"
+        if abs(z) >= self.entry_z * self.stop_loss_mult:
+            return "STOP_LOSS", "STOP_LOSS"
         if z > self.entry_z:
             return "SELL", "BUY"
         if z < -self.entry_z:
@@ -802,6 +858,26 @@ class PeerDiscovery:
 
     # ── US peers ──────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _rank_by_dollar_volume(symbols: list[str]) -> list[str]:
+        """Ranks symbols by 1-month average dollar volume, descending.
+        Returns [] if the batch download fails (caller falls back)."""
+        import yfinance as yf
+
+        try:
+            raw = yf.download(symbols, period="1mo", auto_adjust=True, progress=False)
+            if raw.empty:
+                return []
+            if isinstance(raw.columns, pd.MultiIndex):
+                close, vol = raw['Close'], raw['Volume']
+            else:  # single symbol
+                close = raw[['Close']].set_axis(symbols[:1], axis=1)
+                vol   = raw[['Volume']].set_axis(symbols[:1], axis=1)
+            dollar = (close * vol).mean().dropna().sort_values(ascending=False)
+            return [str(s) for s in dollar.index if s in symbols]
+        except Exception:
+            return []
+
     def _find_us_peers(self, ticker: str) -> PeerGroup:
         import yfinance as yf
 
@@ -832,15 +908,23 @@ class PeerDiscovery:
             sl = str(s).lower()
             return gics.lower() in sl or seed_sector.lower() in sl
 
-        peers_df = sp500[sp500['Sector'].apply(_match)].head(self.top_n)
+        peers_df = sp500[sp500['Sector'].apply(_match)]
 
         if peers_df.empty:
             raise ValueError(
                 f"S&P500에서 '{seed_sector}' 섹터 종목을 찾을 수 없습니다."
             )
 
-        tickers = peers_df['Symbol'].astype(str).tolist()
-        names   = dict(zip(peers_df['Symbol'].astype(str), peers_df['Name'].astype(str)))
+        all_symbols = peers_df['Symbol'].astype(str).tolist()
+        names       = dict(zip(peers_df['Symbol'].astype(str), peers_df['Name'].astype(str)))
+
+        # The FDR S&P500 listing is roughly alphabetical, so head(top_n) would
+        # pick "first N by name". Rank the sector's constituents by 1-month
+        # average dollar volume (one batched download) and keep the most
+        # liquid top_n instead. Falls back to listing order on failure.
+        tickers = self._rank_by_dollar_volume(all_symbols)[: self.top_n]
+        if not tickers:
+            tickers = all_symbols[: self.top_n]
 
         if ticker not in tickers:
             tickers = [ticker] + tickers[: self.top_n - 1]
@@ -879,7 +963,8 @@ class KMeansPeerDiscovery:
     Global pool (universe, pre-filter)
     ────────────────────────────────────
     KOSPI 상위 universe_size개 + KOSDAQ 상위 universe_size개
-    + S&P500 상위 universe_size개 + INDUSTRY_GROUPS 등록 해외 종목
+    + S&P500 동일 섹터 전체 (GICS 컬럼 기반, API 호출 불필요)
+    + INDUSTRY_GROUPS 등록 해외 종목
       (홍콩/중국/대만 등, 예: SMIC = 0981.HK)
     을 하나의 후보 풀로 합친 뒤, 시드 종목의 yfinance 업종(대분류, GICS
     스타일)과 같은 종목만 남깁니다. 반도체처럼 국가 구분 없는 글로벌
@@ -981,12 +1066,19 @@ class KMeansPeerDiscovery:
                 pool.append(t)
                 names[t] = row['Name']
 
+        # S&P500: the GICS Sector column is free (no per-ticker API call), so
+        # instead of an arbitrary head() slice (the FDR listing is roughly
+        # alphabetical, NOT market-cap ordered) we take every constituent in
+        # the seed's sector.
         sp500 = _load_sp500_listing()
-        for _, row in sp500.head(self.universe_size).iterrows():
+        for _, row in sp500.iterrows():
+            sec = str(row['Sector'])
+            if seed_gics_sector and sec != seed_gics_sector:
+                continue
             t = str(row['Symbol'])
             pool.append(t)
             names[t] = str(row['Name'])
-            sp500_gics[t] = str(row['Sector'])
+            sp500_gics[t] = sec
 
         for gdata in INDUSTRY_GROUPS.values():
             for t, n in gdata.get('names', {}).items():
@@ -1182,7 +1274,7 @@ class KMeansPeerDiscovery:
                 f"K-means 클러스터링 · '{seed_gics}' 섹터 내 글로벌 통합 풀 "
                 "(국가/거래소 구분 없음, 업종은 yfinance sector로 1차 필터링) · "
                 f"KOSPI/KOSDAQ 상위 {self.universe_size}개 + "
-                f"S&P500 상위 {self.universe_size}개 + INDUSTRY_GROUPS 해외 종목 중 "
+                f"S&P500 동일 섹터 전체 + INDUSTRY_GROUPS 해외 종목 중 "
                 "동일 섹터만 · 원화 종목은 일별 환율로 USD 환산 후 정규화 · "
                 "⚠ 주가 움직임 기반 결과이므로 공적분 검정 결과를 함께 확인하세요"
             ),

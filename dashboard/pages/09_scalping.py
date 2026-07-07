@@ -268,6 +268,13 @@ def load_info(ticker: str) -> dict:
     return PriceCollector().get_info(ticker)
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def load_quote(ticker: str):
+    """미국 종목 실시간(Finnhub)/지연(yfinance) 시세. 60초 캐시."""
+    from data.collectors.realtime_quote import get_quote
+    return get_quote(ticker)
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_fg() -> str:
     try:
@@ -290,6 +297,11 @@ sig = detect_signals(df)
 last     = df.iloc[-1]
 prev     = df.iloc[-2] if len(df) > 1 else last
 close    = float(last["Close"])
+
+# 미국 종목: 실시간(Finnhub) 또는 최신 체결가로 현재가 갱신 + 지연 배지
+quote = None if is_kr(ticker) else load_quote(ticker)
+if quote and quote.price:
+    close = float(quote.price)
 vol      = float(last["Volume"])
 vol_avg  = float(last.get("Vol_Avg", vol))
 vol_ratio = sig["vol_ratio"]
@@ -322,6 +334,12 @@ m2.metric("전일 대비", fmt_price(change_abs, ticker), delta_color="normal")
 m3.metric("거래량",    f"{vol:,.0f}", f"{vol_ratio:.1f}x 평균")
 m4.metric(f"{period_label} 고가", fmt_price(period_high, ticker))
 m5.metric(f"{period_label} 저가", fmt_price(period_low,  ticker))
+
+if quote is not None:
+    from data.collectors.realtime_quote import badge_text
+    _badge = badge_text(quote)
+    if _badge:
+        st.caption(_badge)
 
 
 # ── Signal summary ─────────────────────────────────────────────────────────────

@@ -61,9 +61,12 @@ class PairsTrading:
     End-to-end pairs trading analysis for two tickers.
 
     Thresholds (configurable):
-        entry_z  = 2.0  — open position when |Z| crosses this
-        exit_z   = 0.5  — close position when |Z| falls below this
-        alpha    = 0.05 — cointegration significance level (p-value cutoff)
+        entry_z        = 2.0  — open position when |Z| crosses this
+        exit_z         = 0.5  — close position when |Z| falls below this
+        alpha          = 0.05 — cointegration significance level (p-value cutoff)
+        stop_loss_mult = 1.75 — force-close (STOP_LOSS) when |Z| ≥ entry_z × mult;
+                                a spread this far past entry suggests the
+                                cointegration relationship has broken down
     """
 
     def __init__(
@@ -73,6 +76,7 @@ class PairsTrading:
         entry_z: float = 2.0,
         exit_z: float = 0.5,
         alpha: float = 0.05,
+        stop_loss_mult: float = 1.75,
     ) -> None:
         self._collector = PriceCollector()
         self.period = period
@@ -80,6 +84,7 @@ class PairsTrading:
         self.entry_z = entry_z
         self.exit_z = exit_z
         self.alpha = alpha
+        self.stop_loss_mult = stop_loss_mult
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -170,6 +175,19 @@ class PairsTrading:
         ticker_a = str(spread_result.price_a.name)
         ticker_b = str(spread_result.price_b.name)
 
+        stop_z = self.entry_z * self.stop_loss_mult
+        if abs(z_now) >= stop_z:
+            # Spread has run far past the entry threshold — mean reversion is
+            # not happening, so treat the cointegration as broken.
+            return PairSignal(
+                zscore_latest=z_now,
+                signal_a="STOP_LOSS",
+                signal_b="STOP_LOSS",
+                label=(
+                    f"공적분 붕괴 의심 (Z={z_now:.2f}, 손절선 ±{stop_z:.2f}) — "
+                    f"보유 포지션 강제 청산 권고"
+                ),
+            )
         if z_now > self.entry_z:
             # Spread too wide — A overpriced vs B
             return PairSignal(
