@@ -1,10 +1,17 @@
 """
 News collector: Google News RSS (primary per-ticker) + feedparser market RSS (secondary).
 Filters by TRUSTED_PUBLISHERS whitelist and recency window.
+
+관련성 점수 (score_relevance):
+  1.0  직접 — 종목명/티커가 제목에 등장
+  0.8  직접 — 요약(본문 스니펫) 앞 100자에 등장
+  0.5  섹터 — TICKER_SECTOR → SECTOR_KEYWORDS 키워드가 제목/요약에 등장
+  0.0  일반 — 위 어디에도 해당 없음 (filter_relevant 기본 임계 0.5에서 탈락)
 """
 
 from __future__ import annotations
 
+import difflib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -15,7 +22,13 @@ import feedparser
 from config.sources import (
     BLOCKED_KEYWORDS, RSS_FEEDS, TRUSTED_PUBLISHERS,
     TICKER_KR_NAME, KOSPI_TICKER_MAP, NASDAQ_TICKER_MAP,
+    SECTOR_KEYWORDS, TICKER_SECTOR,
 )
+
+# 직접 언급으로 인정할 요약 앞부분 길이
+_SUMMARY_HEAD_CHARS = 100
+# 제목 유사도가 이 값 이상이면 같은 기사(재탕)로 판정
+_DUP_SIMILARITY = 0.75
 
 
 @dataclass
@@ -26,6 +39,8 @@ class Article:
     published_at: Optional[datetime]
     summary: str = ""
     ticker: str = ""
+    relevance: float = 0.0        # 0.0~1.0 (score_relevance가 채움)
+    relevance_tier: str = ""      # "직접" | "섹터" | ""(미채점/일반)
 
 
 class NewsCollector:
@@ -187,14 +202,26 @@ class NewsCollector:
 
     @staticmethod
     def _deduplicate(articles: list[Article]) -> list[Article]:
-        seen: set[str] = set()
-        out: list[Article] = []
+        """제목 유사도 기반 중복/재탕 제거.
+
+        완전 일치(소문자 80자)는 물론, 조사·어미·매체명 꼬리표만 다른
+        재탕 기사도 SequenceMatcher 유사도 ≥ _DUP_SIMILARITY면 제거한다.
+        기사 수가 수십 건 수준이라 O(n²) 비교도 무해하다.
+        """
+        kept: list[Article] = []
+        kept_titles: list[str] = []
         for a in articles:
-            key = a.title.strip().lower()[:80]
-            if key not in seen:
-                seen.add(key)
-                out.append(a)
-        return out
+            title_norm = a.title.strip().lower()
+            # 구글 뉴스 제목 꼬리표(" - 매체명") 제거 후 비교
+            core = title_norm.rsplit(" - ", 1)[0]
+            is_dup = any(
+                difflib.SequenceMatcher(None, core, prev).ratio() >= _DUP_SIMILARITY
+                for prev in kept_titles
+            )
+            if not is_dup:
+                kept.append(a)
+                kept_titles.append(core)
+        return kept
 
     def build_filter_keywords(self, ticker: str, market: str) -> set[str]:
         """Returns keywords (company names / ticker symbol) for relevance filtering."""
@@ -215,23 +242,60 @@ class NewsCollector:
                     keywords.add(name)
         return {k for k in keywords if k}
 
-    def filter_relevant(self, articles: list[Article], ticker: str, market: str) -> list[Article]:
-        """Keeps only articles whose title/summary mentions the company or ticker."""
+    def score_relevance(
+        self, articles: list[Article], ticker: str, market: str,
+    ) -> list[Article]:
+        """각 기사의 relevance/relevance_tier를 채운다 (in-place, 반환은 동일 리스트).
+
+        직접(제목 1.0 / 요약 앞부분 0.8) > 섹터 키워드(0.5) > 일반(0.0).
+        """
         keywords = self.build_filter_keywords(ticker, market)
-        if not keywords:
-            return articles
         is_kr = market in ("KOSPI", "KOSDAQ")
-        result = []
+        if not is_kr:
+            keywords = {k.lower() for k in keywords}
+
+        sector = TICKER_SECTOR.get(ticker) or TICKER_SECTOR.get(ticker.split(".")[0], "")
+        sector_kws = SECTOR_KEYWORDS.get(sector, [])
+
+        def _contains(text: str, kws) -> bool:
+            if not is_kr:
+                text = text.lower()
+            return any(kw in text for kw in kws)
+
         for a in articles:
-            text = a.title + " " + a.summary
-            if is_kr:
-                if any(kw in text for kw in keywords):
-                    result.append(a)
+            head = a.summary[:_SUMMARY_HEAD_CHARS]
+            if keywords and _contains(a.title, keywords):
+                a.relevance, a.relevance_tier = 1.0, "직접"
+            elif keywords and _contains(head, keywords):
+                a.relevance, a.relevance_tier = 0.8, "직접"
+            elif sector_kws and _contains(a.title + " " + a.summary, sector_kws):
+                a.relevance, a.relevance_tier = 0.5, "섹터"
             else:
-                text_lower = text.lower()
-                if any(kw.lower() in text_lower for kw in keywords):
-                    result.append(a)
-        return result
+                a.relevance, a.relevance_tier = 0.0, ""
+        return articles
+
+    def filter_relevant(
+        self,
+        articles: list[Article],
+        ticker: str,
+        market: str,
+        min_relevance: float = 0.5,
+    ) -> list[Article]:
+        """관련도 점수 기반 필터 — 직접 언급 우선, 섹터 키워드는 낮은 점수로 포함.
+
+        점수 내림차순(같으면 최신순)으로 정렬해 반환하므로 직접 언급 기사가
+        항상 앞에 온다.
+        """
+        self.score_relevance(articles, ticker, market)
+        kept = [a for a in articles if a.relevance >= min_relevance]
+        kept.sort(
+            key=lambda a: (
+                a.relevance,
+                a.published_at or datetime.min.replace(tzinfo=timezone.utc),
+            ),
+            reverse=True,
+        )
+        return kept
 
     def to_dicts(self, articles: list[Article]) -> list[dict]:
         return [
@@ -242,6 +306,8 @@ class NewsCollector:
                 "summary": a.summary,
                 "published_at": a.published_at.isoformat() if a.published_at else "",
                 "ticker": a.ticker,
+                "relevance": a.relevance,
+                "relevance_tier": a.relevance_tier,
             }
             for a in articles
         ]

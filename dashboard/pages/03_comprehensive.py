@@ -275,7 +275,13 @@ pos_words = {"급등", "상승", "호재", "사상최고", "기록", "흑자", "
 neg_words = {"급락", "하락", "악재", "적자", "하향", "매도", "부정", "우려", "위기", "손실", "경고"}
 
 if total_collected > 0:
-    st.caption(f"{total_collected}건 수집 → {len(articles)}건 관련 뉴스 필터링")
+    n_direct = sum(1 for a in articles if a.get("relevance_tier") == "직접")
+    n_sector = sum(1 for a in articles if a.get("relevance_tier") == "섹터")
+    st.caption(
+        f"{total_collected}건 수집 → {len(articles)}건 채택 "
+        f"(🎯 직접 언급 {n_direct} · 🏭 섹터 키워드 {n_sector}) — "
+        "중복·재탕 및 관련성 낮은 기사 제외"
+    )
 
 if articles:
     pos_cnt = sum(
@@ -314,12 +320,26 @@ if articles:
             is_neg = any(w in title for w in neg_words)
             dot_color = "#26a69a" if is_pos else ("#ef5350" if is_neg else "#888")
             trust_icon = "✅" if (_trusted_sources and any(t in source for t in _trusted_sources)) else "⚠️"
+            tier = a.get("relevance_tier", "")
+            rel  = a.get("relevance", 0.0)
+            if tier == "직접":
+                rel_badge = (
+                    f'<span style="background:rgba(38,166,154,0.18);color:#26a69a;'
+                    f'border-radius:4px;padding:0 5px;font-size:10px">🎯 직접 {rel:.1f}</span> '
+                )
+            elif tier == "섹터":
+                rel_badge = (
+                    f'<span style="background:rgba(255,152,0,0.15);color:#FF9800;'
+                    f'border-radius:4px;padding:0 5px;font-size:10px">🏭 섹터 {rel:.1f}</span> '
+                )
+            else:
+                rel_badge = ""
             line = (
                 f'<div style="display:flex;gap:8px;padding:5px 0;'
                 f'border-bottom:1px solid rgba(255,255,255,0.07)">'
                 f'  <span style="color:{dot_color};margin-top:2px">●</span>'
                 f'  <div>'
-                f'    <span style="color:#888;font-size:11px">{trust_icon} [{source}] {pub}</span><br>'
+                f'    <span style="color:#888;font-size:11px">{rel_badge}{trust_icon} [{source}] {pub}</span><br>'
             )
             if url:
                 line += f'    <a href="{url}" target="_blank" style="color:#ccc;font-size:13px;text-decoration:none">{title}</a>'
@@ -329,7 +349,7 @@ if articles:
             st.markdown(line, unsafe_allow_html=True)
 else:
     if total_collected > 0:
-        st.caption("관련 뉴스를 찾을 수 없습니다. (종목명·티커가 포함된 기사 없음)")
+        st.caption("관련 뉴스를 찾을 수 없습니다. (종목명 직접 언급·섹터 키워드 매칭 기사 없음)")
     else:
         st.caption("최근 48시간 내 뉴스를 수집할 수 없습니다.")
     sent_label = "😐 중립"
@@ -490,7 +510,7 @@ def _build_prompt() -> str:
             f"{news_lines}"
         )
     else:
-        news_txt = f"수집 {total_collected}건 → 관련 뉴스 없음 (종목명·티커 포함 기사 없음)"
+        news_txt = f"수집 {total_collected}건 → 관련 뉴스 없음 (종목명 직접 언급·섹터 키워드 매칭 기사 없음)"
 
     # peer
     if pair_info:
