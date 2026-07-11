@@ -16,7 +16,7 @@ from analysis.technical.indicators import (
     TechnicalIndicators, VOL_SPIKE_MULT, VWAP_WINDOW,
 )
 from config.sources import TICKER_KR_NAME, TICKER_SECTOR
-from utils.ticker_utils import detect_market, is_kr
+from utils.ticker_utils import detect_market, is_kr, resolve_currency, fmt_price_currency
 from utils.search_widget import ticker_search_widget
 
 # ── Color palette ─────────────────────────────────────────────────────────────
@@ -100,7 +100,7 @@ if df.empty:
 
 # ── Header: company name + key metrics ───────────────────────────────────────
 company_name = TICKER_KR_NAME.get(ticker) or info.get("shortName") or info.get("longName") or ticker
-currency = "KRW" if kr else "USD"
+currency, currency_symbol = resolve_currency(info, kr)
 
 last = df.iloc[-1]
 prev = df.iloc[-2] if len(df) > 1 else last
@@ -120,7 +120,7 @@ period_low = df["Low"].min()
 
 
 def fmt_price(val: float) -> str:
-    return f"₩{val:,.0f}" if kr else f"${val:,.2f}"
+    return fmt_price_currency(val, currency, currency_symbol)
 
 
 def fmt_volume(vol: float) -> str:
@@ -554,7 +554,7 @@ else:
 with st.expander("최근 가격 데이터"):
     display = df[["Open", "High", "Low", "Close", "Volume"]].tail(10).copy()
     display.index = display.index.strftime("%Y-%m-%d")
-    price_fmt = (lambda x: f"₩{x:,.0f}") if kr else (lambda x: f"${x:,.2f}")
+    price_fmt = lambda x: fmt_price_currency(x, currency, currency_symbol)
     for col in ["Open", "High", "Low", "Close"]:
         display[col] = display[col].map(price_fmt)
     display["Volume"] = display["Volume"].map(fmt_volume)

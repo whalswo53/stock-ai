@@ -83,10 +83,10 @@ def collect_and_build(ticker: str, market: str) -> dict | None:
     articles: list[dict] = []
     try:
         news_col = NewsCollector()
-        raw_articles = news_col.fetch_by_ticker(ticker, market, hours=24)
+        raw_articles = news_col.fetch_by_ticker(ticker, market, hours=24, company_name=company_name)
         # 관련성 필터 (직접 언급 + 섹터 키워드) — 무관 기사가 AI 프롬프트에
         # 들어가지 않도록 03_comprehensive와 동일 기준 적용
-        relevant = news_col.filter_relevant(raw_articles, ticker, market)
+        relevant = news_col.filter_relevant(raw_articles, ticker, market, company_name=company_name)
         articles = news_col.to_dicts(relevant)
     except Exception:
         pass

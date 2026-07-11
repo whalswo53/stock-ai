@@ -521,6 +521,31 @@ def fmt_price(val: float, ticker: str) -> str:
     return f"${val:,.2f}"
 
 
+# ── Currency resolution (소스 기반, 하드코딩 대체) ────────────────────────────
+CURRENCY_SYMBOL: dict[str, str] = {
+    "USD": "$", "HKD": "HK$", "KRW": "₩",
+    "CNY": "¥", "JPY": "¥", "GBP": "£", "EUR": "€", "TWD": "NT$",
+}
+
+
+def resolve_currency(info: dict | None, is_korean: bool) -> tuple[str, str]:
+    """yfinance .info의 실제 통화를 반영해 (통화코드, 기호)를 반환한다.
+
+    한국 종목은 info의 currency 필드가 부정확하거나 없을 수 있어 무조건 KRW.
+    그 외는 info["currency"]를 신뢰하고, 매핑에 없는 코드는 "코드 " 형태로 표시.
+    """
+    if is_korean:
+        return "KRW", "₩"
+    code = (info or {}).get("currency") or "USD"
+    return code, CURRENCY_SYMBOL.get(code, code + " ")
+
+
+def fmt_price_currency(val: float, currency_code: str, symbol: str) -> str:
+    """resolve_currency()가 반환한 통화로 가격을 포맷한다 (KRW/JPY는 정수, 그 외 소수 2자리)."""
+    decimals = 0 if currency_code in ("KRW", "JPY") else 2
+    return f"{symbol}{val:,.{decimals}f}"
+
+
 def get_display_name(ticker: str) -> str:
     """
     티커 → 표시용 회사명 반환 (정적 맵 기반, 네트워크 없음).

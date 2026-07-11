@@ -12,6 +12,7 @@ Filters by TRUSTED_PUBLISHERS whitelist and recency window.
 from __future__ import annotations
 
 import difflib
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -29,6 +30,27 @@ from config.sources import (
 _SUMMARY_HEAD_CHARS = 100
 # 제목 유사도가 이 값 이상이면 같은 기사(재탕)로 판정
 _DUP_SIMILARITY = 0.75
+
+# 회사명 뒤에 붙는 법인격 접미사 — 검색어/키워드 매칭 노이즈라 제거
+_CORP_SUFFIX_RE = re.compile(
+    r"[,.]?\s*\b(Inc|Incorporated|Corp|Corporation|Co\.?\s*,?\s*Ltd|Ltd|Holdings?|"
+    r"Group|PLC|S\.?A\.?|N\.?V\.?|AG|SE)\b\.?\s*$",
+    re.IGNORECASE,
+)
+
+
+def _clean_company_name(name: str) -> str:
+    """야후 파이낸스 longName/shortName에서 법인격 접미사를 반복 제거한 검색용 회사명.
+
+    예: "Apple Inc." -> "Apple", "Semiconductor Manufacturing International
+    Corporation" -> "Semiconductor Manufacturing International".
+    """
+    name = (name or "").strip()
+    prev = None
+    while prev != name:
+        prev = name
+        name = _CORP_SUFFIX_RE.sub("", name).strip()
+    return name
 
 
 @dataclass
@@ -57,9 +79,15 @@ class NewsCollector:
         ticker: str,
         market: str = "NASDAQ",
         hours: int = 24,
+        company_name: str = "",
     ) -> list[Article]:
-        """Fetches news via Google News RSS for the given ticker."""
-        articles = self._from_google_news(ticker, market, hours)
+        """Fetches news via Google News RSS for the given ticker.
+
+        company_name: yfinance .info의 longName/shortName 등 실제 회사명.
+        검색어는 항상 회사명 기반이어야 한다 — 티커(특히 0981.HK처럼 숫자
+        코드인 경우)로 검색하면 Google News에서 무관한 결과만 걸린다.
+        """
+        articles = self._from_google_news(ticker, market, hours, company_name)
         return self._deduplicate(articles)
 
     def fetch_market_news(
@@ -77,11 +105,12 @@ class NewsCollector:
         ticker: str,
         market: str,
         hours: int,
+        company_name: str = "",
     ) -> list[Article]:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
         results: list[Article] = []
 
-        for feed_url in self._google_news_urls(ticker, market):
+        for feed_url in self._google_news_urls(ticker, market, company_name):
             try:
                 parsed = feedparser.parse(feed_url)
             except Exception:
@@ -119,26 +148,42 @@ class NewsCollector:
 
         return results
 
-    def _google_news_urls(self, ticker: str, market: str) -> list[str]:
+    def _google_news_urls(self, ticker: str, market: str, company_name: str = "") -> list[str]:
         """Builds Google News RSS URLs for the ticker.
 
-        KR stocks  → 1 feed: Korean locale, Korean company name.
-        US stocks  → 2 feeds: Korean locale (ticker only) + English locale (ticker + company name).
+        검색어는 항상 회사명 기반 — 티커/거래소 접미사(0981.HK 등)로 검색하지 않는다.
+        숫자 코드(HK/CN 등)를 그대로 쓰면 Google News에서 아무 의미 없는 결과만
+        걸리기 때문에, company_name(yfinance longName/shortName)을 최우선으로 쓰고
+        정적 맵의 한글/영문명은 보조로만 쓴다.
+
+        KR stocks     → 1 feed: 한국어 로케일, 한글 회사명.
+        그 외 전 종목 → 2 feeds: 한국어 로케일(회사명) + 영어 로케일(티커+영문 회사명).
         """
+        clean_name = _clean_company_name(company_name)
+
         if market in ("KOSPI", "KOSDAQ"):
-            name = TICKER_KR_NAME.get(ticker) or ticker.split(".")[0]
+            name = TICKER_KR_NAME.get(ticker) or clean_name or ticker.split(".")[0]
             return [self._GNEWS_KR.format(q=quote_plus(name))]
 
         base = ticker.split(".")[0]
-        # Pick the first English company name longer than the ticker symbol itself
+        kr_query = clean_name or base
+
+        # 정적 맵에 영문 회사명이 있으면 우선 사용, 없으면 info 기반 clean_name으로 보완
         en_name = next(
             (n for n, t in NASDAQ_TICKER_MAP.items()
              if t == base and all(ord(c) < 128 for c in n) and len(n) > len(base)),
             "",
-        )
-        en_query = f"{base} {en_name}".strip() if en_name else base
+        ) or clean_name
+
+        # base가 순수 숫자 코드(HK/CN 등)면 회사명 없이 붙이지 않는다 — "0981 SMIC" 같은
+        # 잡음을 피하고 이름만으로 검색한다.
+        if en_name and not base.isdigit():
+            en_query = f"{base} {en_name}".strip()
+        else:
+            en_query = en_name or base
+
         return [
-            self._GNEWS_KR.format(q=quote_plus(base)),
+            self._GNEWS_KR.format(q=quote_plus(kr_query)),
             self._GNEWS_EN.format(q=quote_plus(en_query)),
         ]
 
@@ -223,8 +268,16 @@ class NewsCollector:
                 kept_titles.append(core)
         return kept
 
-    def build_filter_keywords(self, ticker: str, market: str) -> set[str]:
-        """Returns keywords (company names / ticker symbol) for relevance filtering."""
+    def build_filter_keywords(
+        self, ticker: str, market: str, company_name: str = "",
+    ) -> set[str]:
+        """Returns keywords (company names / ticker symbol) for relevance filtering.
+
+        company_name(정제된 실제 회사명)을 항상 포함한다 — 정적 맵에 없는 종목
+        (HK/CN 등)은 이 값이 없으면 "직접 언급" 판정 자체가 불가능해진다.
+        base가 순수 숫자 코드(예: "0981")면 키워드로 넣지 않는다 — 기사 본문의
+        아무 숫자에나 우연히 매칭되는 잡음이라 정직한 판정에 방해가 된다.
+        """
         keywords: set[str] = set()
         if market in ("KOSPI", "KOSDAQ"):
             kr_name = TICKER_KR_NAME.get(ticker, "")
@@ -235,21 +288,26 @@ class NewsCollector:
                     keywords.add(name)
         else:
             base = ticker.split(".")[0]
-            if len(base) >= 2:
+            if len(base) >= 2 and not base.isdigit():
                 keywords.add(base)
             for name, t in NASDAQ_TICKER_MAP.items():
                 if t == base and len(name) >= 2:
                     keywords.add(name)
+
+        clean_name = _clean_company_name(company_name)
+        if len(clean_name) >= 2:
+            keywords.add(clean_name)
+
         return {k for k in keywords if k}
 
     def score_relevance(
-        self, articles: list[Article], ticker: str, market: str,
+        self, articles: list[Article], ticker: str, market: str, company_name: str = "",
     ) -> list[Article]:
         """각 기사의 relevance/relevance_tier를 채운다 (in-place, 반환은 동일 리스트).
 
         직접(제목 1.0 / 요약 앞부분 0.8) > 섹터 키워드(0.5) > 일반(0.0).
         """
-        keywords = self.build_filter_keywords(ticker, market)
+        keywords = self.build_filter_keywords(ticker, market, company_name)
         is_kr = market in ("KOSPI", "KOSDAQ")
         if not is_kr:
             keywords = {k.lower() for k in keywords}
@@ -280,13 +338,14 @@ class NewsCollector:
         ticker: str,
         market: str,
         min_relevance: float = 0.5,
+        company_name: str = "",
     ) -> list[Article]:
         """관련도 점수 기반 필터 — 직접 언급 우선, 섹터 키워드는 낮은 점수로 포함.
 
         점수 내림차순(같으면 최신순)으로 정렬해 반환하므로 직접 언급 기사가
         항상 앞에 온다.
         """
-        self.score_relevance(articles, ticker, market)
+        self.score_relevance(articles, ticker, market, company_name)
         kept = [a for a in articles if a.relevance >= min_relevance]
         kept.sort(
             key=lambda a: (

@@ -1,7 +1,10 @@
 """
 종합 분석 페이지.
-기술적 분석 · 뉴스/센티먼트 · 페어 트레이딩 신호 · 시장 분위기를 한 화면에서 확인하고
-통합 AI 프롬프트를 생성한다.
+
+core/analysis_modules.py에 @register된 모든 분석 모듈을 순회(run_all)해서
+그린다 — 개별 모듈을 이 페이지가 손으로 골라 호출하지 않으므로, 새 분석
+모듈에 @register만 붙이면 이 페이지에 자동으로 나타난다.
+(종합분석 ≡ 등록된 모든 모듈의 합집합)
 """
 from __future__ import annotations
 
@@ -13,22 +16,15 @@ _root = Path(__file__).resolve().parent.parent.parent
 if str(_root) not in sys.path:
     sys.path.insert(0, str(_root))
 
-import pandas as pd
 import streamlit as st
-import plotly.graph_objects as go
 
+import core.analysis_modules  # noqa: F401 — import 시 @register 모듈들이 등록됨
 from analysis.technical.indicators import TechnicalIndicators
-from analysis.technical.signals import score as tech_score
-from config.sources import TICKER_KR_NAME, TRUSTED_PUBLISHERS
-from data.collectors.market_sentiment import (
-    MarketSentimentCollector,
-    FearGreedResult,
-    score_to_color,
-)
-from data.collectors.news_collector import NewsCollector
+from core.analysis_registry import run_all
 from data.collectors.price_collector import PriceCollector
+from config.sources import TICKER_KR_NAME
 from utils.clipboard import copy_button
-from utils.ticker_utils import detect_market, is_kr, fmt_price
+from utils.ticker_utils import detect_market, is_kr, resolve_currency
 from utils.search_widget import ticker_search_widget
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -45,19 +41,18 @@ with st.sidebar:
 
     st.divider()
     st.caption(
-        "⬆ 종목을 입력하면 아래 5개 섹션이 자동으로 채워집니다:\n\n"
-        "1️⃣ 기술적 분석  2️⃣ 뉴스/센티먼트\n"
-        "3️⃣ 페어 트레이딩  4️⃣ 시장 분위기\n"
-        "5️⃣ 통합 AI 프롬프트"
+        "⬆ 종목을 입력하면 등록된 모든 분석 모듈이 자동으로 채워집니다.\n\n"
+        "새 분석을 추가하려면 `core/analysis_modules.py`에 `@register`만 붙이면 "
+        "이 페이지에 자동으로 나타납니다."
     )
 
 market = detect_market(ticker)
 kr     = is_kr(ticker)
 
 
-# ── Data loaders (all cached) ─────────────────────────────────────────────────
+# ── Price/info load (ctx의 기초 데이터) ────────────────────────────────────────
 @st.cache_data(ttl=3600, show_spinner=False)
-def _load_price(ticker: str) -> tuple[pd.DataFrame, dict]:
+def _load_price(ticker: str):
     pc  = PriceCollector()
     df  = pc.fetch(ticker, period="6mo")
     if not df.empty:
@@ -66,531 +61,90 @@ def _load_price(ticker: str) -> tuple[pd.DataFrame, dict]:
     return df, info
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def _load_news(ticker: str, market: str) -> tuple[list[dict], int]:
-    """Returns (관련 뉴스 목록, 수집 총 건수)."""
-    try:
-        nc    = NewsCollector()
-        raw   = nc.fetch_by_ticker(ticker, market, hours=48)
-        total = len(raw)
-        filtered = nc.filter_relevant(raw, ticker, market)
-        return nc.to_dicts(filtered), total
-    except Exception:
-        return [], 0
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def _load_fg() -> FearGreedResult:
-    return MarketSentimentCollector().fetch()
-
-
-# 페어 트레이딩 신호 — 07_pairs_trading.py와 동일한 클래스를 재사용한다.
-# PeerDiscovery(동종업종 탐색) → PairScanner(Engle-Granger 공적분 검정으로
-# 후보 중 p-value 최저 = 가장 신뢰도 높은 피어 1개 선정) → QuantAggregator
-# (OLS + 칼만 앙상블). 페어 트레이딩 페이지의 "자동 스캔"과 "직접 분석" 탭을
-# 그대로 이어붙인 것과 동일한 계산이므로, 같은 파라미터로 같은 쌍을 분석하면
-# 두 페이지의 수치가 일치한다.
-_PAIR_ALPHA = 0.05
-_PAIR_PERIOD = "1y"
-_PAIR_ZSCORE_WINDOW = 30
-_PAIR_ENTRY_Z = 2.0
-_PAIR_EXIT_Z = 0.5
-_PAIR_KALMAN_DELTA = 1e-4
-_PAIR_STOP_MULT = 1.75  # |Z| ≥ entry_z × mult → STOP_LOSS (공적분 붕괴 의심)
-
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def _discover_peer_candidates(ticker: str) -> tuple[list[str], dict[str, str], str, str]:
-    """동종업종 피어 탐색. 07_pairs_trading.py 자동 스캔 탭의 '업종 분류 기반'과 동일
-    (PeerDiscovery: KR=네이버 업종 / US=S&P500 GICS, INDUSTRY_GROUPS 보조 포함)."""
-    from analysis.quant.pair_scanner import PeerDiscovery
-    pg = PeerDiscovery(top_n=10).find(ticker)
-    return pg.tickers, pg.names, pg.sector, pg.source
-
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def _best_cointegrated_peer(
-    ticker: str, tickers_tuple: tuple, names_json: str, alpha: float,
-) -> tuple[str, float, bool] | None:
-    """후보 피어들에 Engle-Granger 공적분 검정을 돌려 p-value가 가장 낮은
-    (=가장 신뢰도 높은) 피어 하나를 고른다. PairScanner.scan_tickers는 이미
-    p-value 오름차순으로 정렬해 반환한다."""
-    import json
-    from analysis.quant.pair_scanner import PairScanner
-
-    names = json.loads(names_json)
-    scanner = PairScanner(period=_PAIR_PERIOD, alpha=alpha)
-    prices = scanner.fetch_prices_for(list(tickers_tuple))
-    results = scanner.scan_tickers(
-        list(tickers_tuple), names, prices, seed_ticker=ticker,
-    )
-    if not results:
-        return None
-    best = results[0]
-    return best.ticker_b, best.pvalue, best.is_cointegrated
-
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def _run_pair_aggregate(ticker: str, peer: str, alpha: float):
-    """OLS + 칼만 앙상블. 07_pairs_trading.py 직접 분석 탭과 동일한 QuantAggregator."""
-    from analysis.quant.aggregator import QuantAggregator
-    return QuantAggregator(
-        period=_PAIR_PERIOD, zscore_window=_PAIR_ZSCORE_WINDOW,
-        entry_z=_PAIR_ENTRY_Z, exit_z=_PAIR_EXIT_Z,
-        kalman_delta=_PAIR_KALMAN_DELTA, alpha=alpha,
-        stop_loss_mult=_PAIR_STOP_MULT,
-    ).run_pair(ticker, peer)
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def _load_pair_analysis(ticker: str) -> dict | None:
-    import json
-
-    try:
-        tickers, names, sector, source = _discover_peer_candidates(ticker)
-    except Exception:
-        return None
-
-    if len([t for t in tickers if t != ticker]) < 1:
-        return None
-
-    try:
-        best = _best_cointegrated_peer(
-            ticker, tuple(tickers), json.dumps(names, ensure_ascii=False), _PAIR_ALPHA,
-        )
-    except Exception:
-        best = None
-    if not best:
-        return None
-    peer, _pvalue, _is_coint = best
-
-    try:
-        result = _run_pair_aggregate(ticker, peer, _PAIR_ALPHA)
-    except Exception:
-        return None
-
-    return {
-        "peer": peer,
-        "peer_name": names.get(peer, peer),
-        "sector": sector,
-        "source": source,
-        "result": result,  # AggregatedPairResult
-    }
-
-
 # ── Page title ────────────────────────────────────────────────────────────────
 st.title("🎯  종합 분석")
 
-with st.spinner(f"'{ticker}' 데이터 수집 중… (가격 · 지표 · 뉴스 · 시장 분위기)"):
-    df, info                 = _load_price(ticker)
-    articles, total_collected = _load_news(ticker, market)
-    fg                       = _load_fg()
+with st.spinner(f"'{ticker}' 데이터 수집 중…"):
+    df, info = _load_price(ticker)
 
 if df.empty:
     st.error(f"'{ticker}' 가격 데이터를 불러올 수 없습니다. 티커 코드를 확인하세요.")
     st.stop()
 
 company = TICKER_KR_NAME.get(ticker) or info.get("shortName") or info.get("longName") or ticker
-last    = df.iloc[-1]
-prev    = df.iloc[-2] if len(df) > 1 else last
-close   = float(last["Close"])
-chg_abs = close - float(prev["Close"])
-chg_pct = (chg_abs / float(prev["Close"])) * 100
+currency_code, currency_symbol = resolve_currency(info, kr)
 
-st.subheader(f"{company} ({ticker})  ·  {market}")
+st.subheader(f"{company} ({ticker})  ·  {market}  ·  {currency_code}")
 
-# ── Section 1: 기술적 분석 요약 ─────────────────────────────────────────────
-st.markdown("### 1️⃣  기술적 분석 요약")
+# ── ctx 조립 (모든 등록 모듈이 이 규격을 공유) ─────────────────────────────────
+ctx = {
+    "ticker": ticker,
+    "df": df,
+    "info": info,
+    "currency": currency_code,
+    "symbol": currency_symbol,
+    "is_korean": kr,
+    "market": market,
+}
 
-rsi_val = float(last.get("RSI", 50) or 50)
-macd_v  = float(last.get("MACD", 0) or 0)
-macd_s  = float(last.get("MACD_Signal", 0) or 0)
-bb_up   = float(last.get("BB_Upper", close * 1.02) or close * 1.02)
-bb_lo   = float(last.get("BB_Lower", close * 0.98) or close * 0.98)
-ma5     = float(last.get("MA5", 0) or 0)
-ma20    = float(last.get("MA20", 0) or 0)
-t_score = float(tech_score(last))
+with st.spinner("등록된 분석 모듈 실행 중… (기술적 · 캔들 · 밸류 · 뉴스 · 상대강도 · 시장분위기)"):
+    results = run_all(ctx)
 
-bb_range = bb_up - bb_lo
-bb_pct   = (close - bb_lo) / bb_range if bb_range > 0 else 0.5
+_NUM_EMOJI = [f"{i}️⃣" for i in range(1, 10)]  # 1️⃣ 2️⃣ … 9️⃣
 
-# Interpretations
-rsi_interp   = ("과매수 ⚠️" if rsi_val >= 70 else "과매도 💡" if rsi_val <= 30 else "중립")
-macd_interp  = "골든크로스 📈" if macd_v > macd_s else "데드크로스 📉"
-bb_interp    = ("상단 근접 ⚠️" if bb_pct >= 0.85 else "하단 근접 💡" if bb_pct <= 0.15 else f"중앙권 ({bb_pct:.0%})")
-trend_interp = "단기 상승" if ma5 > ma20 and ma20 > 0 else ("단기 하락" if ma5 < ma20 and ma20 > 0 else "—")
-
-# Overall card
-sig_color = "#26a69a" if t_score > 0.15 else ("#ef5350" if t_score < -0.15 else "#9E9E9E")
-sig_label = "매수 관심 🟢" if t_score > 0.15 else ("매도 주의 🔴" if t_score < -0.15 else "중립 ⏸")
-
-c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("현재가",          fmt_price(close, ticker), f"{chg_pct:+.2f}%")
-c2.metric(f"RSI (14)",      f"{rsi_val:.1f}",  rsi_interp)
-c3.metric("MACD",           "골든" if macd_v > macd_s else "데드", macd_interp)
-c4.metric("BB 위치",         f"{bb_pct:.0%}",  bb_interp)
-c5.metric("기술 점수",        f"{t_score:+.2f}", sig_label)
-
-# Compact chart (expander, 기본 접힘)
-with st.expander("📊 차트 보기 (6개월)", expanded=False):
-    fig = go.Figure()
-    fig.add_trace(go.Candlestick(
-        x=df.index, open=df["Open"], high=df["High"],
-        low=df["Low"], close=df["Close"], name="가격",
-        increasing=dict(line=dict(color="#26a69a"), fillcolor="#26a69a"),
-        decreasing=dict(line=dict(color="#ef5350"), fillcolor="#ef5350"),
-    ))
-    for w, col in [(20, "#2196F3"), (60, "#9C27B0")]:
-        col_name = f"MA{w}"
-        if col_name in df.columns:
-            fig.add_trace(go.Scatter(
-                x=df.index, y=df[col_name], name=f"MA{w}",
-                line=dict(color=col, width=1.3),
-            ))
-    if "BB_Upper" in df.columns:
-        fig.add_trace(go.Scatter(x=df.index, y=df["BB_Upper"], name="BB 상단",
-                                  line=dict(color="rgba(200,200,200,0.5)", width=1, dash="dash")))
-        fig.add_trace(go.Scatter(x=df.index, y=df["BB_Lower"], name="BB 하단",
-                                  line=dict(color="rgba(200,200,200,0.5)", width=1, dash="dash"),
-                                  fill="tonexty", fillcolor="rgba(200,200,200,0.05)"))
-    tick_fmt = ",.0f" if kr else ".2f"
-    fig.update_layout(
-        height=420, template="plotly_dark",
-        xaxis_rangeslider_visible=False,
-        margin=dict(l=10, r=10, t=20, b=10),
-        hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="right", x=1,
-                    bgcolor="rgba(0,0,0,0)", font=dict(size=10)),
-    )
-    fig.update_yaxes(tickformat=tick_fmt)
-    st.plotly_chart(fig, width="stretch")
-
-st.divider()
-
-# ── Section 2: 종목 관련 뉴스 ────────────────────────────────────────────────
-st.markdown("### 2️⃣  종목 관련 뉴스")
-
-_trusted_sources = TRUSTED_PUBLISHERS.get(market, [])
-pos_words = {"급등", "상승", "호재", "사상최고", "기록", "흑자", "상향", "매수", "긍정", "성장", "기대"}
-neg_words = {"급락", "하락", "악재", "적자", "하향", "매도", "부정", "우려", "위기", "손실", "경고"}
-
-if total_collected > 0:
-    n_direct = sum(1 for a in articles if a.get("relevance_tier") == "직접")
-    n_sector = sum(1 for a in articles if a.get("relevance_tier") == "섹터")
-    st.caption(
-        f"{total_collected}건 수집 → {len(articles)}건 채택 "
-        f"(🎯 직접 언급 {n_direct} · 🏭 섹터 키워드 {n_sector}) — "
-        "중복·재탕 및 관련성 낮은 기사 제외"
-    )
-
-if articles:
-    pos_cnt = sum(
-        1 for a in articles[:10]
-        if any(w in (a.get("title", "") + a.get("summary", "")) for w in pos_words)
-    )
-    neg_cnt = sum(
-        1 for a in articles[:10]
-        if any(w in (a.get("title", "") + a.get("summary", "")) for w in neg_words)
-    )
-    sent_label = (
-        "😀 긍정"  if pos_cnt > neg_cnt + 1 else
-        "😟 부정"  if neg_cnt > pos_cnt + 1 else
-        "😐 중립"
-    )
-    sent_color = "#26a69a" if "긍정" in sent_label else ("#ef5350" if "부정" in sent_label else "#9E9E9E")
-
-    sc1, sc2 = st.columns([1, 3])
-    sc1.markdown(
-        f'<div style="background:rgba(255,255,255,0.04);border-radius:8px;'
-        f'padding:16px;text-align:center">'
-        f'  <div style="font-size:11px;color:#888;margin-bottom:4px">전반 감성</div>'
-        f'  <div style="font-size:26px;font-weight:700;color:{sent_color}">{sent_label}</div>'
-        f'  <div style="font-size:11px;color:#666;margin-top:4px">'
-        f'긍정 {pos_cnt} · 부정 {neg_cnt} / {min(len(articles), 10)}건</div>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
-    with sc2:
-        for a in articles[:5]:
-            pub    = (a.get("published_at") or "")[:10]
-            source = a.get("source", "")
-            title  = a.get("title", "")
-            url    = a.get("url", "")
-            is_pos = any(w in title for w in pos_words)
-            is_neg = any(w in title for w in neg_words)
-            dot_color = "#26a69a" if is_pos else ("#ef5350" if is_neg else "#888")
-            trust_icon = "✅" if (_trusted_sources and any(t in source for t in _trusted_sources)) else "⚠️"
-            tier = a.get("relevance_tier", "")
-            rel  = a.get("relevance", 0.0)
-            if tier == "직접":
-                rel_badge = (
-                    f'<span style="background:rgba(38,166,154,0.18);color:#26a69a;'
-                    f'border-radius:4px;padding:0 5px;font-size:10px">🎯 직접 {rel:.1f}</span> '
-                )
-            elif tier == "섹터":
-                rel_badge = (
-                    f'<span style="background:rgba(255,152,0,0.15);color:#FF9800;'
-                    f'border-radius:4px;padding:0 5px;font-size:10px">🏭 섹터 {rel:.1f}</span> '
-                )
-            else:
-                rel_badge = ""
-            line = (
-                f'<div style="display:flex;gap:8px;padding:5px 0;'
-                f'border-bottom:1px solid rgba(255,255,255,0.07)">'
-                f'  <span style="color:{dot_color};margin-top:2px">●</span>'
-                f'  <div>'
-                f'    <span style="color:#888;font-size:11px">{rel_badge}{trust_icon} [{source}] {pub}</span><br>'
-            )
-            if url:
-                line += f'    <a href="{url}" target="_blank" style="color:#ccc;font-size:13px;text-decoration:none">{title}</a>'
-            else:
-                line += f'    <span style="color:#ccc;font-size:13px">{title}</span>'
-            line += "  </div></div>"
-            st.markdown(line, unsafe_allow_html=True)
-else:
-    if total_collected > 0:
-        st.caption("관련 뉴스를 찾을 수 없습니다. (종목명 직접 언급·섹터 키워드 매칭 기사 없음)")
+for i, r in enumerate(results):
+    label = _NUM_EMOJI[i] if i < len(_NUM_EMOJI) else f"{i + 1}."
+    st.markdown(f"### {label}  {r.title}")
+    if r.render:
+        r.render()
     else:
-        st.caption("최근 48시간 내 뉴스를 수집할 수 없습니다.")
-    sent_label = "😐 중립"
-    pos_cnt = neg_cnt = 0
+        st.markdown(r.markdown)
+    st.divider()
 
-st.divider()
+# ── 대시보드용 통합 JSON ────────────────────────────────────────────────────────
+merged_json: dict = {}
+for r in results:
+    merged_json.update(r.json)
 
-# ── Section 3: 페어 트레이딩 신호 ───────────────────────────────────────────
-st.markdown("### 3️⃣  페어 트레이딩 신호")
 
-with st.spinner("동종업종 피어 탐색 + 공적분 검정 중…"):
-    pair_info = _load_pair_analysis(ticker)
+# ── Section: 통합 AI 프롬프트 ───────────────────────────────────────────────────
+_num_label = _NUM_EMOJI[len(results)] if len(results) < len(_NUM_EMOJI) else f"{len(results) + 1}."
+st.markdown(f"### {_num_label}  통합 AI 분석 프롬프트")
+st.caption(f"위 {len(results)}개 섹션 데이터가 모두 포함된 프롬프트입니다. 복사 후 Claude.ai에 붙여넣으세요.")
 
-if pair_info:
-    agg    = pair_info["result"]
-    coint  = agg.coint_result
-    z      = agg.composite_zscore
-    signal = agg.signal_a
 
-    sig_color = {"BUY": "#26a69a", "SELL": "#ef5350", "CLOSE": "#FF9800",
-                 "STOP_LOSS": "#ab47bc"}.get(signal, "#9E9E9E")
-    sig_rgb   = {"BUY": "38,166,154", "SELL": "239,83,80", "CLOSE": "255,152,0",
-                 "STOP_LOSS": "171,71,188"}.get(signal, "100,100,100")
-
-    pc1, pc2, pc3, pc4 = st.columns([1, 1, 1, 2])
-    pc1.metric("비교 종목", pair_info["peer_name"], pair_info["peer"])
-    pc2.metric(
-        "공적분 (Engle-Granger)",
-        "있음 ✅" if coint.is_cointegrated else "없음 ❌",
-        f"p={coint.pvalue:.4f}",
-    )
-    pc3.metric(f"종합 Z-score ({_PAIR_ZSCORE_WINDOW}일)", f"{z:+.2f} σ", signal)
-    with pc4:
-        st.markdown(
-            f'<div style="background:rgba({sig_rgb},0.12);'
-            f'border-left:3px solid {sig_color};border-radius:0 8px 8px 0;padding:10px 14px">'
-            f'  {agg.label}'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
-
-    w_ols, w_kalman = agg.contributions[0].weight, agg.contributions[1].weight
-    st.caption(
-        f"업종: {pair_info['sector']}  ·  {pair_info['source']}  ·  "
-        f"OLS {w_ols*100:.0f}% / 칼만 {w_kalman*100:.0f}% 가중 앙상블  ·  "
-        f"공적분 유의수준 {_PAIR_ALPHA:.0%}, 기간 {_PAIR_PERIOD}  \n"
-        "📊 **페어 트레이딩** 페이지의 직접 분석 탭에서 이 쌍으로 상세 분석(차트 포함)을 확인할 수 있습니다."
-    )
-else:
-    st.caption(
-        "이 종목에 대한 동종 비교 데이터가 없습니다.  \n"
-        "📊 **페어 트레이딩** 페이지에서 직접 종목 쌍을 입력해 상세 분석을 받을 수 있습니다."
-    )
-    pair_info = None
-
-st.divider()
-
-# ── Section 4: 시장 분위기 ──────────────────────────────────────────────────
-st.markdown("### 4️⃣  시장 전반 분위기")
-
-fg_score = fg.score
-fg_label = fg.label
-fg_color = score_to_color(fg_score)
-fg_vix   = fg.vix
-
-fg_interp = (
-    "극도의 공포 상태 — 역발상 매수 기회일 수 있음" if fg_score <= 20 else
-    "공포 우세 — 시장 불안감이 높음. 신중한 접근 권장" if fg_score <= 40 else
-    "중립 — 시장 방향성 불확실. 종목 개별 분석 중심으로" if fg_score <= 60 else
-    "탐욕 우세 — 상승 기대감 강함. 과열 여부 주의" if fg_score <= 80 else
-    "극도의 탐욕 — 시장 과열 신호. 포트폴리오 리스크 점검 권장"
-)
-
-fg1, fg2 = st.columns([1, 3])
-
-with fg1:
-    # Mini gauge
-    mini_fig = go.Figure(go.Indicator(
-        mode="gauge+number",
-        value=fg_score,
-        number={"font": {"size": 36, "color": "white"}, "valueformat": "d"},
-        gauge={
-            "axis": {"range": [0, 100], "tickvals": [0, 50, 100],
-                     "tickcolor": "#666", "tickwidth": 1},
-            "bar": {"color": fg_color, "thickness": 0.04},
-            "bgcolor": "rgba(0,0,0,0)", "borderwidth": 0,
-            "steps": [
-                {"range": [0,  20], "color": "#c62828"},
-                {"range": [20, 40], "color": "#e64a19"},
-                {"range": [40, 60], "color": "#f9a825"},
-                {"range": [60, 80], "color": "#558b2f"},
-                {"range": [80, 100], "color": "#00695c"},
-            ],
-            "threshold": {"line": {"color": "white", "width": 4},
-                          "thickness": 0.85, "value": fg_score},
-        },
-    ))
-    mini_fig.update_layout(
-        height=160,
-        margin=dict(l=20, r=20, t=20, b=5),
-        paper_bgcolor="rgba(0,0,0,0)",
-        font={"color": "white"},
-    )
-    st.plotly_chart(mini_fig, width="stretch")
-
-with fg2:
-    _vix_row = (
-        f'<div style="color:#888;font-size:12px">VIX: {fg_vix}</div>'
-        if fg_vix >= 0 else ""
-    )
-    st.markdown(
-        f'<div style="padding:10px 0">'
-        f'  <div style="font-size:20px;font-weight:700;color:{fg_color};margin-bottom:4px">'
-        f'{fg_label} ({fg_score}/100)</div>'
-        f'  <div style="color:#bbb;font-size:14px;margin-bottom:10px">{fg_interp}</div>'
-        f'  {_vix_row}'
-        f'  <div style="color:#555;font-size:11px;margin-top:6px">출처: {fg.source}</div>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
-
-st.divider()
-
-# ── Section 5: 통합 AI 프롬프트 ────────────────────────────────────────────
-st.markdown("### 5️⃣  통합 AI 분석 프롬프트")
-st.caption("위 4개 섹션 데이터가 모두 포함된 프롬프트입니다. 복사 후 Claude.ai에 붙여넣으세요.")
-
-# ── Prompt builder ────────────────────────────────────────────────────────────
 def _build_prompt() -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-    # tech
-    rsi_txt  = f"RSI(14): {rsi_val:.1f} ({rsi_interp})"
-    macd_txt = f"MACD: {macd_v:.4f} / Signal: {macd_s:.4f} → {macd_interp}"
-    bb_txt   = (
-        f"볼린저밴드: 상단 {fmt_price(bb_up, ticker)} / 하단 {fmt_price(bb_lo, ticker)} "
-        f"(%B {bb_pct:.2f}) → {bb_interp}"
-    )
-    ma_txt   = (
-        f"MA5: {fmt_price(ma5, ticker)} / MA20: {fmt_price(ma20, ticker)} → {trend_interp}"
-        if ma5 > 0 else "MA: 데이터 부족"
-    )
-    price_hist = (
-        df.tail(5)[["Open", "High", "Low", "Close", "Volume"]].to_string(
-            float_format=lambda x: f"{x:,.2f}"
-        )
-    )
-
-    # news
-    if articles:
-        news_lines = "\n".join(
-            f"- [{a.get('source', '')}] {a.get('title', '')} ({(a.get('published_at') or '')[:10]})"
-            for a in articles[:5]
-        )
-        news_txt = (
-            f"수집 {total_collected}건 → 관련 뉴스 {len(articles)}건\n"
-            f"전반 감성: {sent_label} (긍정 {pos_cnt} · 부정 {neg_cnt} / {min(len(articles),10)}건)\n\n"
-            f"{news_lines}"
-        )
-    else:
-        news_txt = f"수집 {total_collected}건 → 관련 뉴스 없음 (종목명 직접 언급·섹터 키워드 매칭 기사 없음)"
-
-    # peer
-    if pair_info:
-        _agg   = pair_info["result"]
-        _coint = _agg.coint_result
-        peer_txt = (
-            f"비교 종목: {pair_info['peer_name']} ({pair_info['peer']}) [{pair_info['sector']}]\n"
-            f"공적분(Engle-Granger) p-value: {_coint.pvalue:.4f} "
-            f"({'공적분 있음' if _coint.is_cointegrated else '공적분 없음'}, "
-            f"유의수준 {_PAIR_ALPHA:.0%})\n"
-            f"종합(OLS+칼만) Z-score: {_agg.composite_zscore:+.2f} σ → {_agg.label}"
-        )
-    else:
-        peer_txt = "동종 비교 데이터 없음"
-
-    # fg
-    fg_txt = (
-        f"CNN 공포·탐욕 지수: {fg_score}/100 ({fg_label})\n"
-        f"해석: {fg_interp}\n"
-        + (f"VIX: {fg_vix:.1f}\n" if fg_vix >= 0 else "")
-        + f"업데이트: {fg.last_update}"
+    sections_md = "\n\n---\n\n".join(
+        f"## {i + 1}️⃣ {r.title}\n\n{r.markdown}" for i, r in enumerate(results)
     )
 
     return f"""# 종합 투자 분석 요청 — {ticker} ({company})
 
 **분석 시각:** {now}
-**시장:** {market}  |  **통화:** {"KRW" if kr else "USD"}
+**시장:** {market}  |  **통화:** {currency_code}
 
 ---
 
-## 1️⃣ 기술적 분석 (6개월 기준)
-
-**현재가:** {fmt_price(close, ticker)} ({chg_pct:+.2f}%)
-**기술적 점수:** {t_score:+.2f} → {sig_label}
-
-| 지표 | 값 | 해석 |
-|------|-----|------|
-| {rsi_txt.split(":")[0]} | {rsi_val:.1f} | {rsi_interp} |
-| MACD | {macd_v:.4f} / Sig {macd_s:.4f} | {macd_interp} |
-| BB 위치 | %B {bb_pct:.2f} | {bb_interp} |
-| MA5 / MA20 | {fmt_price(ma5, ticker)} / {fmt_price(ma20, ticker)} | {trend_interp} |
-
-**최근 5거래일 가격:**
-
-```
-{price_hist}
-```
-
----
-
-## 2️⃣ 종목 관련 뉴스
-
-{news_txt}
-
----
-
-## 3️⃣ 동종 종목 상대 강도
-
-{peer_txt}
-
----
-
-## 4️⃣ 시장 전반 분위기
-
-{fg_txt}
+{sections_md}
 
 ---
 
 ## 분석 요청
 
-위 4개 섹션 데이터를 종합하여 다음을 분석해주세요:
+위 {len(results)}개 섹션 데이터를 종합하여 다음을 분석해주세요.
+**이 종목의 섹터·상장지역 특성상 관련된 거시·지정학·규제 리스크를 반영해 분석하라.**
 
 1. **현재 투자 매력도** — 매수·관망·매도 중 판단과 근거 3가지
 2. **가장 주목할 긍정 요소와 리스크** — 각 2가지씩
 3. **시장 분위기가 이 종목에 미치는 영향** — F&G + 뉴스 감성 연계
-4. **시나리오별 전망:**
+4. **밸류에이션 관점** — 현재 밸류가 기술적/뉴스 시그널과 부합하는지
+5. **시나리오별 전망:**
    - 단기 (1주일): 예상 방향성과 주의 가격대
    - 중기 (1개월): 추세 유지 조건
    - 장기 (3개월): 섹터·시장 관점 평가
-5. **투자자 유형별 조언:**
+6. **투자자 유형별 조언:**
    - 단타 트레이더 (1주 이내): 진입 조건 + 손절가 + 목표가
    - 중장기 투자자 (3개월+): 분할 매수 전략
 
