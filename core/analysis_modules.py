@@ -264,7 +264,7 @@ def candle_section(ctx: dict) -> AnalysisResult:
 
 @register("밸류에이션", order=30)
 def valuation_section(ctx: dict) -> AnalysisResult:
-    fundamentals = get_fundamentals(ctx.get("info"), ctx["ticker"], ctx["is_korean"])
+    fundamentals = get_fundamentals(ctx)
     markdown = (
         "펀더멘털 데이터 미제공" if is_fully_missing(fundamentals)
         else to_markdown_table(fundamentals)
