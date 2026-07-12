@@ -15,7 +15,6 @@ faulthandler.enable(file=open(_faulthandler_log, "a"), all_threads=True)
 
 import streamlit as st
 from dotenv import load_dotenv
-from data.collectors.market_sentiment import MarketSentimentCollector, score_to_color
 
 load_dotenv()
 
@@ -59,54 +58,12 @@ def _show_login() -> None:
                 st.error("비밀번호가 올바르지 않습니다.")
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def _load_fear_greed() -> dict:
-    fg = MarketSentimentCollector().fetch()
-    return {
-        "score": fg.score,
-        "label": fg.label,
-        "vix": fg.vix,
-        "last_update": fg.last_update,
-    }
-
-
 if not st.session_state.get("authenticated", False):
     _show_login()
     st.stop()
 
-# Authenticated: sidebar Fear & Greed widget + logout
+# Authenticated: logout (F&G는 종합분석 페이지에 이미 섹션으로 있어 중복 제거됨)
 with st.sidebar:
-    try:
-        _fg = _load_fear_greed()
-        _score = _fg["score"]
-        _label = _fg["label"]
-        _color = score_to_color(_score)
-        _vix_txt = f"VIX {_fg['vix']:.1f}  ·  " if _fg["vix"] >= 0 else ""
-        _upd_txt = _fg.get("last_update", "")
-        st.markdown(
-            f"""<div style="padding:10px 4px 4px 4px">
-            <div style="font-size:11px;color:#888;margin-bottom:6px">📊 공포·탐욕 지수</div>
-            <div style="font-size:26px;font-weight:700;color:{_color};line-height:1.1">
-              {_score}
-              <span style="font-size:13px;font-weight:400;color:{_color}">{_label}</span>
-            </div>
-            <div style="background:linear-gradient(to right,#c62828,#e64a19,#f9a825,#558b2f,#00695c);
-                        height:5px;border-radius:3px;margin:8px 0 4px 0;position:relative">
-              <div style="position:absolute;left:{_score}%;transform:translateX(-50%);top:-4px;
-                          width:3px;height:13px;background:white;border-radius:2px"></div>
-            </div>
-            <div style="display:flex;justify-content:space-between;font-size:10px;color:#555">
-              <span>극도공포</span><span>중립</span><span>극도탐욕</span>
-            </div>
-            <div style="font-size:10px;color:#555;margin-top:4px">{_vix_txt}CNN F&amp;G</div>
-            {f'<div style="font-size:9px;color:#444;margin-top:2px">기준: {_upd_txt}</div>' if _upd_txt else ''}
-            </div>""",
-            unsafe_allow_html=True,
-        )
-    except Exception:
-        pass
-
-    st.divider()
     if st.button("로그아웃", width="stretch"):
         st.session_state["authenticated"] = False
         st.rerun()

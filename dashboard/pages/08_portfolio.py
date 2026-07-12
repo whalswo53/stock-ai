@@ -406,8 +406,11 @@ with tab_dash:
     display_cols = ["종목", "티커", "그룹", "수량", "평균매입가", "현재가",
                     "평가금액", "평가손익", "수익률(%)"]
     df_show = df_all[display_cols].copy()
-    df_show["평균매입가"] = df_show["평균매입가"].map(lambda v: f"{v:,.4g}")
-    df_show["현재가"]     = df_show["현재가"].map(lambda v: f"{v:,.4g}")
+    # 종목 원래 통화 기준 정수/소수 자동 선택(KRW: 정수, USD: 소수 2자리) —
+    # "{:,.4g}"(유효숫자 포맷)는 70000처럼 큰 정수를 "7e+04"로 지수 표기해버리는
+    # 버그가 있어 이미 다른 곳에서 쓰는 통화별 fmt_price로 교체.
+    df_show["평균매입가"] = df_show.apply(lambda r: fmt_price(r["평균매입가"], r["티커"]), axis=1)
+    df_show["현재가"]     = df_show.apply(lambda r: fmt_price(r["현재가"], r["티커"]), axis=1)
     df_show["평가금액"]   = df_show["평가금액"].map(lambda v: f"{v:,.2f}")
     df_show["평가손익"]   = df_show["평가손익"].map(lambda v: f"{v:+,.2f}")
     df_show["수익률(%)"]  = df_show["수익률(%)"].map(lambda v: f"{v:+.2f}")
@@ -857,7 +860,8 @@ with tab_ai:
     for _, row in df_all.iterrows():
         table_lines.append(
             f"| {row['종목']} | {row['_ticker']} | {row['그룹']} | "
-            f"{row['수량']:,.0f} | {row['평균매입가']:,.4g} | {row['현재가']:,.4g} | "
+            f"{row['수량']:,.0f} | {fmt_price(row['평균매입가'], row['_ticker'])} | "
+            f"{fmt_price(row['현재가'], row['_ticker'])} | "
             f"{row['수익률(%)']:+.2f}% | {row['평가손익']:+,.2f} |"
         )
     holdings_table = "\n".join(table_lines)

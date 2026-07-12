@@ -100,6 +100,13 @@ def _cell_polarity(value) -> str | None:
     sig = polarity_from_signal(text)
     if sig:
         return sig
+    # "BUY (매수)"처럼 시그널 뒤에 한글 설명이 붙는 표시용 문자열도 커버 —
+    # 앞쪽 영문 토큰만 뽑아 같은 SIGNAL_POLARITY로 재판정한다(새 매핑 아님).
+    leading = _re.match(r"^[A-Za-z_]+", text)
+    if leading:
+        sig = polarity_from_signal(leading.group(0))
+        if sig:
+            return sig
     for icon, polarity in _ICON_TO_POLARITY.items():
         if text.startswith(icon):
             return polarity

@@ -1052,14 +1052,25 @@ with tab_direct:
             )
 
         with st.expander("📋 신호 기준표"):
+            signal_rule_rows = [
+                {"앙상블 Z": f"|Z| ≥ {entry_z * stop_mult:.2f} ({entry_z}×{stop_mult:.2f})",
+                 label_a: "STOP_LOSS (강제 청산)", label_b: "STOP_LOSS (강제 청산)",
+                 "의미": "공적분 붕괴 의심 · 손실 제한"},
+                {"앙상블 Z": f"Z > +{entry_z}",
+                 label_a: "SELL (매도)", label_b: "BUY (매수)",
+                 "의미": "A 고평가 · B 저평가"},
+                {"앙상블 Z": f"Z < −{entry_z}",
+                 label_a: "BUY (매수)", label_b: "SELL (매도)",
+                 "의미": "A 저평가 · B 고평가"},
+                {"앙상블 Z": f"|Z| < {exit_z}",
+                 label_a: "CLOSE (청산)", label_b: "CLOSE (청산)",
+                 "의미": "스프레드 정상화"},
+                {"앙상블 Z": "그 외",
+                 label_a: "WAIT (관망)", label_b: "WAIT (관망)",
+                 "의미": "진입 조건 미충족"},
+            ]
+            render_clean_table(pd.DataFrame(signal_rule_rows), judgment_col=[label_a, label_b])
             st.markdown(
-                f"| 앙상블 Z | {label_a} | {label_b} | 의미 |\n"
-                f"|---|---|---|---|\n"
-                f"| \\|Z\\| ≥ {entry_z * stop_mult:.2f} ({entry_z}×{stop_mult:.2f}) | STOP_LOSS (강제 청산) | STOP_LOSS (강제 청산) | 공적분 붕괴 의심 · 손실 제한 |\n"
-                f"| Z > +{entry_z} | SELL (매도) | BUY (매수) | A 고평가 · B 저평가 |\n"
-                f"| Z < −{entry_z} | BUY (매수) | SELL (매도) | A 저평가 · B 고평가 |\n"
-                f"| \\|Z\\| < {exit_z} | CLOSE (청산) | CLOSE (청산) | 스프레드 정상화 |\n"
-                f"| 그 외 | WAIT (관망) | WAIT (관망) | 진입 조건 미충족 |\n\n"
                 "**가중치 산출 원리**  \n"
                 "- OLS 가중치 = R² × max(0, 1−2·p_value) — 공적분이 강하고 모델 적합도가 높을수록 ↑  \n"
                 "- 칼만 가중치 = 헤지비율 안정성 (1 − 변동계수) — 동적 비율이 일관적일수록 ↑  \n"
