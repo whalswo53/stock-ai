@@ -31,6 +31,7 @@ from portfolio.manager import (
 )
 from utils.ticker_utils import resolve_ticker as _resolve_base, is_kr, fmt_price, get_display_name
 from utils.clipboard import copy_button
+from ui.components import render_clean_table
 
 # ── Init ──────────────────────────────────────────────────────────────────────
 pm = PortfolioManager()
@@ -405,24 +406,13 @@ with tab_dash:
     display_cols = ["종목", "티커", "그룹", "수량", "평균매입가", "현재가",
                     "평가금액", "평가손익", "수익률(%)"]
     df_show = df_all[display_cols].copy()
+    df_show["평균매입가"] = df_show["평균매입가"].map(lambda v: f"{v:,.4g}")
+    df_show["현재가"]     = df_show["현재가"].map(lambda v: f"{v:,.4g}")
+    df_show["평가금액"]   = df_show["평가금액"].map(lambda v: f"{v:,.2f}")
+    df_show["평가손익"]   = df_show["평가손익"].map(lambda v: f"{v:+,.2f}")
+    df_show["수익률(%)"]  = df_show["수익률(%)"].map(lambda v: f"{v:+.2f}")
 
-    def _color_ret(val: float) -> str:
-        return (f"color:{UP};font-weight:bold" if val > 0
-                else f"color:{DOWN};font-weight:bold" if val < 0 else "")
-
-    st.dataframe(
-        df_show.style
-        .map(_color_ret, subset=["평가손익", "수익률(%)"])
-        .format({
-            "평균매입가": "{:,.4g}",
-            "현재가":    "{:,.4g}",
-            "평가금액":  "{:,.2f}",
-            "평가손익":  "{:+,.2f}",
-            "수익률(%)": "{:+.2f}",
-        }),
-        width="stretch",
-        hide_index=True,
-    )
+    render_clean_table(df_show, judgment_col=["평가손익", "수익률(%)"])
     st.caption("※ 평균매입가/현재가는 종목 원래 통화 기준 (KRW: 원, USD: 달러)")
 
     st.divider()

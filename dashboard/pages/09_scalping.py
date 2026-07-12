@@ -23,7 +23,7 @@ from plotly.subplots import make_subplots
 from config.sources import TICKER_KR_NAME
 from data.collectors.market_sentiment import MarketSentimentCollector, prompt_snippet
 from data.collectors.price_collector import PriceCollector
-from ui.components import polarity_from_signal, render_signal_card, render_verdict_banner
+from ui.components import polarity_from_signal, render_clean_table, render_signal_card, render_verdict_banner
 from utils.ticker_utils import resolve_ticker as _resolve_base, detect_market, is_kr, fmt_price
 from utils.clipboard import copy_button
 from utils.search_widget import ticker_search_widget
@@ -610,10 +610,10 @@ with col_table:
             })
 
         st.caption("**대칭 계산**")
-        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+        render_clean_table(pd.DataFrame(rows))
 
         st.caption("**비대칭 R:R 시나리오 (권장)**")
-        st.dataframe(pd.DataFrame(rr_rows), hide_index=True, width="stretch")
+        render_clean_table(pd.DataFrame(rr_rows))
 
         # Quick guidance
         stop2 = entry_price * 0.98

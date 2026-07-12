@@ -24,7 +24,7 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 
-from analysis.fundamentals import get_fundamentals, is_fully_missing, to_markdown_table
+from analysis.fundamentals import fmt_value, get_fundamentals, is_fully_missing, to_markdown_table
 from analysis.technical import candle_patterns
 from analysis.technical.indicators import TechnicalIndicators
 from analysis.technical.signals import score as tech_score
@@ -33,7 +33,13 @@ from core.analysis_registry import AnalysisResult, register
 from data.collectors.market_sentiment import MarketSentimentCollector, score_to_color
 from data.collectors.news_collector import NewsCollector
 from data.collectors.price_collector import PriceCollector
-from ui.components import polarity_from_signal, render_signal_card
+from ui.components import (
+    POLARITY_LABEL,
+    polarity_from_signal,
+    render_clean_table,
+    render_signal_card,
+    render_stat_grid,
+)
 from utils.ticker_utils import fmt_price_currency
 
 
@@ -270,7 +276,16 @@ def candle_section(ctx: dict) -> AnalysisResult:
         )
     markdown = "\n".join(md_lines)
 
-    return AnalysisResult(title="캔들 패턴", markdown=markdown, json={"캔들_패턴": json_hits})
+    def _render() -> None:
+        st.caption(
+            f"수익률 측정 {horizon}일 후 · 이 종목 5년 히스토리 기준 "
+            f"(표본 {candle_patterns.MIN_SAMPLES}회 미만은 판단 불가)"
+        )
+        render_clean_table(pd.DataFrame(rows), judgment_col="판정")
+
+    return AnalysisResult(
+        title="캔들 패턴", markdown=markdown, json={"캔들_패턴": json_hits}, render=_render,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -301,9 +316,32 @@ def valuation_section(ctx: dict) -> AnalysisResult:
     fundamentals = get_fundamentals(ctx)
     missing = is_fully_missing(fundamentals)
     markdown = "펀더멘털 데이터 미제공" if missing else to_markdown_table(fundamentals)
+    per_polarity = None if missing else _per_polarity(fundamentals)
+
+    def _render() -> None:
+        if missing:
+            st.caption(markdown)
+            return
+        for group, fields in fundamentals.items():
+            st.markdown(f"**{group}**")
+            if all(v == "N/A" for v in fields.values()):
+                st.caption("데이터 미제공")
+                continue
+            items = []
+            for label, v in fields.items():
+                is_per = group == "밸류에이션" and label == "PER"
+                polarity = per_polarity if is_per else None
+                items.append({
+                    "label": label,
+                    "value": fmt_value(label, v),
+                    "eval": POLARITY_LABEL.get(polarity, ""),
+                    "polarity": polarity,
+                })
+            render_stat_grid(items, columns=3)
+
     return AnalysisResult(
         title="밸류에이션", markdown=markdown, json=fundamentals,
-        polarity=None if missing else _per_polarity(fundamentals),
+        polarity=per_polarity, render=_render,
     )
 
 

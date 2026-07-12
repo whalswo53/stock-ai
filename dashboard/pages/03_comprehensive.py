@@ -23,12 +23,10 @@ from analysis.technical.indicators import TechnicalIndicators
 from core.analysis_registry import aggregate_verdict, run_all
 from data.collectors.price_collector import PriceCollector
 from config.sources import TICKER_KR_NAME
-from ui.components import render_signal_card, render_verdict_banner
+from ui.components import POLARITY_LABEL, render_signal_card, render_verdict_banner
 from utils.clipboard import copy_button
 from utils.ticker_utils import detect_market, is_kr, resolve_currency
 from utils.search_widget import ticker_search_widget
-
-_POLARITY_VALUE_LABEL = {"bullish": "강세", "neutral": "중립", "bearish": "약세"}
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -111,7 +109,7 @@ for col, r in zip(cols, results):
     with col:
         render_signal_card(
             r.title,
-            _POLARITY_VALUE_LABEL.get(r.polarity, "정보"),
+            POLARITY_LABEL.get(r.polarity, "정보"),
             "",
             polarity=r.polarity,
         )

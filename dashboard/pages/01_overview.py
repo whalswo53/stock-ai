@@ -16,7 +16,7 @@ from analysis.technical.indicators import (
     TechnicalIndicators, VOL_SPIKE_MULT, VWAP_WINDOW,
 )
 from config.sources import TICKER_KR_NAME, TICKER_SECTOR
-from ui.components import render_signal_card
+from ui.components import render_clean_table, render_signal_card
 from utils.ticker_utils import detect_market, is_kr, resolve_currency, fmt_price_currency
 from utils.search_widget import ticker_search_widget
 
@@ -531,23 +531,11 @@ else:
                     "+ MACD 결합":   _cell(stats["macd"]),
                 })
 
-            def _color_verdict(val: str) -> str:
-                if val.startswith("➖"):
-                    return "color:#9E9E9E"
-                if val.startswith("✅"):
-                    return "color:#26a69a;font-weight:bold"
-                if val.startswith("❌"):
-                    return "color:#ef5350;font-weight:bold"
-                return "color:#FF9800"
-
             st.caption(f"📊 집계 기준: **{pool_label}** · 수익률 측정 {horizon}일 후")
-            st.dataframe(
-                pd.DataFrame(main_rows).style.map(_color_verdict, subset=["판정"]),
-                width="stretch", hide_index=True,
-            )
+            render_clean_table(pd.DataFrame(main_rows), judgment_col="판정")
 
             st.markdown("**복합 신호 성과** — 조건 동시 충족 시 승률 (평균수익, 표본)")
-            st.dataframe(pd.DataFrame(combo_rows), width="stretch", hide_index=True)
+            render_clean_table(pd.DataFrame(combo_rows))
             st.caption(
                 f"거래량 동반 = Vol_Ratio ≥ {candle_patterns.VOL_ACCOMPANY} · "
                 f"RSI 결합 = 강세+RSI≤{candle_patterns.RSI_LOW} / 약세+RSI≥{candle_patterns.RSI_HIGH} · "
@@ -562,4 +550,5 @@ with st.expander("최근 가격 데이터"):
     for col in ["Open", "High", "Low", "Close"]:
         display[col] = display[col].map(price_fmt)
     display["Volume"] = display["Volume"].map(fmt_volume)
-    st.dataframe(display, width="stretch")
+    display = display.reset_index(names="날짜")
+    render_clean_table(display)

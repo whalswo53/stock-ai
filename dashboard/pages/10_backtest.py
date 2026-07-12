@@ -23,6 +23,7 @@ from plotly.subplots import make_subplots
 from analysis.backtest.engine import BacktestEngine, BacktestResult, benchmark_equity
 from analysis.backtest.strategies import STRATEGIES, generate_signals
 from data.collectors.price_collector import PriceCollector
+from ui.components import render_clean_table
 from utils.ticker_utils import resolve_ticker as _resolve, is_kr as _is_kr, get_display_name
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -297,7 +298,7 @@ with tab_summary:
         "알파(벤치마크대비)": "0.0%",
     })
 
-    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    render_clean_table(pd.DataFrame(rows), judgment_col=["총수익률", "CAGR", "MDD", "샤프", "승률"])
 
     # ── 평가 기준 범례 ────────────────────────────────────────────────────────
     with st.expander("📖 평가 기준"):
@@ -417,7 +418,7 @@ with tab_risk:
             "평균 보유 기간": f"{avg_hold:.0f}일",
         })
 
-    st.dataframe(pd.DataFrame(risk_rows), hide_index=True, width="stretch")
+    render_clean_table(pd.DataFrame(risk_rows), judgment_col=["MDD", "샤프 비율"])
 
     st.caption(
         "**MDD 해석**: 투자 기간 중 최고점 대비 최대 하락폭. "
@@ -499,7 +500,7 @@ with tab_heatmap:
                     axis=1,
                 ).values,
             })
-            st.dataframe(ann_df, hide_index=True, width="stretch")
+            render_clean_table(ann_df, judgment_col=["월평균 수익률", "연간 누적"])
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -551,19 +552,11 @@ with tab_trades:
                 "손익":    t.profit,
             })
         df_trades = pd.DataFrame(trade_rows)
-
-        def _color_ret(val: float) -> str:
-            return "color:#26a69a;font-weight:bold" if val > 0 else (
-                   "color:#ef5350;font-weight:bold" if val < 0 else "")
-
         fmt_price = "₩{:,.0f}" if is_kr else "${:,.2f}"
-        st.dataframe(
-            df_trades.style
-            .map(_color_ret, subset=["수익률", "손익"])
-            .format({"수익률": "{:+.2f}%", "손익": fmt_price}),
-            width="stretch",
-            hide_index=True,
-        )
+        df_trades["수익률"] = df_trades["수익률"].map(lambda v: f"{v:+.2f}%")
+        df_trades["손익"]   = df_trades["손익"].map(fmt_price.format)
+
+        render_clean_table(df_trades, judgment_col=["수익률", "손익"])
 
         # 수익률 분포 bar chart
         st.divider()

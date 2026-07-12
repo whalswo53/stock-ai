@@ -54,7 +54,7 @@ def is_fully_missing(data: dict) -> bool:
     return all(_group_fully_missing(fields) for fields in data.values())
 
 
-def _fmt_value(label: str, v) -> str:
+def fmt_value(label: str, v) -> str:
     if v == "N/A":
         return "N/A"
     kind = FIELD_FMT_KIND.get(label, "num")
@@ -77,6 +77,6 @@ def to_markdown_table(data: dict) -> str:
             continue
         lines = ["| 지표 | 값 |", "|------|-----|"]
         for label, v in fields.items():
-            lines.append(f"| {label} | {_fmt_value(label, v)} |")
+            lines.append(f"| {label} | {fmt_value(label, v)} |")
         parts.append("\n".join(lines))
     return "\n\n".join(parts)

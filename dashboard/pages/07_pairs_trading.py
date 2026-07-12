@@ -28,7 +28,7 @@ from analysis.quant.pair_scanner import (
 )
 from config.sources import TICKER_KR_NAME, KOSPI_TICKER_MAP, NASDAQ_TICKER_MAP, HK_CN_TICKER_MAP
 from data.collectors.price_collector import PriceCollector
-from ui.components import polarity_from_signal, render_signal_card
+from ui.components import polarity_from_signal, render_clean_table, render_signal_card
 
 # ── Palette ───────────────────────────────────────────────────────────────────
 OLS_COLOR    = "#2196F3"
@@ -133,6 +133,9 @@ def _resolve_ticker(raw: str) -> tuple[str, str | None]:
 
 
 # ── Scan result table styling ─────────────────────────────────────────────────
+# 상위 5쌍 표는 행 클릭 선택(scan_prefill)이 필요해 st.dataframe 네이티브 위젯을
+# 유지한다 — render_clean_table(순수 HTML)은 selection_mode를 지원하지 않는다.
+# 그 외(전체 목록·Copula 등 선택 기능이 없는 표)는 render_clean_table로 통일했다.
 
 def _style_scan(df: pd.DataFrame, alpha: float = 0.05) -> pd.DataFrame:
     styles = pd.DataFrame("", index=df.index, columns=df.columns)
@@ -189,10 +192,7 @@ def _render_scan_results(
     )
     if len(df_show) > 5:
         with st.expander(f"전체 {len(df_show)}쌍 보기"):
-            st.dataframe(
-                df_show.style.apply(_style_scan, alpha=alpha, axis=None),
-                width="stretch", hide_index=True,
-            )
+            render_clean_table(df_show, judgment_col=["공적분", "A 신호", "B 신호"])
 
     # Copula 의존성 (enrich_with_copula가 상위 후보에만 채움)
     cop_rows = [
@@ -215,7 +215,7 @@ def _render_scan_results(
                 "스프레드가 위기에도 유지될 가능성이 높아 페어로 더 신뢰할 수 있습니다. "
                 "꼬리의존이 0에 가까우면 평시에만 동행하는 쌍이니 주의하세요."
             )
-            st.dataframe(pd.DataFrame(cop_rows), width="stretch", hide_index=True)
+            render_clean_table(pd.DataFrame(cop_rows))
 
     selected_rows = event.selection.rows if event.selection else []
     if selected_rows:
@@ -826,7 +826,7 @@ with tab_direct:
             col_sig_b:     result.signal_b,
             "신뢰도 지표": "가중 평균",
         })
-        st.dataframe(pd.DataFrame(contrib_rows), width="stretch", hide_index=True)
+        render_clean_table(pd.DataFrame(contrib_rows), judgment_col=[col_sig_a, col_sig_b])
 
         w_ols    = result.contributions[0].weight
         w_kalman = result.contributions[1].weight
@@ -1071,29 +1071,11 @@ with tab_direct:
             sp_ols = ols.spread.reindex(ols_z.index)
             tbl = pd.DataFrame({
                 "날짜":         ols_z.index.strftime("%Y-%m-%d"),
-                "OLS 스프레드": sp_ols.values,
-                "OLS Z":        ols_z.values,
-                "Kalman Z":     kal_z.values,
+                "OLS 스프레드": [f"{v:.4f}" for v in sp_ols.values],
+                "OLS Z":        [f"{v:.4f}" for v in ols_z.values],
+                "Kalman Z":     [f"{v:.4f}" for v in kal_z.values],
             }).reset_index(drop=True)
-
-            def _color_z(val):
-                try:
-                    v = float(val)
-                except (TypeError, ValueError):
-                    return ""
-                if abs(v) >= entry_z * stop_mult:
-                    return "color:#ab47bc;font-weight:bold"
-                if v > entry_z:     return "color:#ef5350;font-weight:bold"
-                if v < -entry_z:    return "color:#26a69a;font-weight:bold"
-                if abs(v) < exit_z: return "color:#FF9800"
-                return ""
-
-            st.dataframe(
-                tbl.style
-                .format({"OLS 스프레드": "{:.4f}", "OLS Z": "{:.4f}", "Kalman Z": "{:.4f}"})
-                .map(_color_z, subset=["OLS Z", "Kalman Z"]),
-                width="stretch",
-            )
+            render_clean_table(tbl)
 
         # ── 섹션 6: 지표 종합 대시보드 & AI 프롬프트 ─────────────────────────
         st.subheader("6. 지표 종합 대시보드")
@@ -1180,16 +1162,7 @@ with tab_direct:
              "판정": (f"{BAD} — 손절선 도달" if abs(z_now) >= stop_z else f"{OK} — 손절선 이내")},
         ]
 
-        def _color_verdict(val: str) -> str:
-            if val.startswith("✅"): return "color:#26a69a;font-weight:bold"
-            if val.startswith("⚠️"): return "color:#FF9800"
-            if val.startswith("❌"): return "color:#ef5350;font-weight:bold"
-            return "color:#9E9E9E"
-
-        st.dataframe(
-            pd.DataFrame(summary_rows).style.map(_color_verdict, subset=["판정"]),
-            width="stretch", hide_index=True,
-        )
+        render_clean_table(pd.DataFrame(summary_rows), judgment_col="판정")
         st.caption(
             "판단 우선순위: **Hurst/반감기 (1차 적합성) > 공적분 (관계 검증) > "
             "Copula (꼬리위험) > Z-score (타이밍)** — 1차 적합성이 부적합이면 "
@@ -1353,23 +1326,7 @@ with tab_direct:
             p_tail = mr.price.reindex(z_tail.index)
             tbl = pd.DataFrame({
                 "날짜":    z_tail.index.strftime("%Y-%m-%d"),
-                "가격":    p_tail.values,
-                "Z-score": z_tail.values,
+                "가격":    [f"{v:,.2f}" for v in p_tail.values],
+                "Z-score": [f"{v:.4f}" for v in z_tail.values],
             }).reset_index(drop=True)
-
-            def _color_z2(val):
-                try:
-                    v = float(val)
-                except (TypeError, ValueError):
-                    return ""
-                if v > entry_z:     return "color:#ef5350;font-weight:bold"
-                if v < -entry_z:    return "color:#26a69a;font-weight:bold"
-                if abs(v) < exit_z: return "color:#FF9800"
-                return ""
-
-            st.dataframe(
-                tbl.style
-                .format({"가격": "{:,.2f}", "Z-score": "{:.4f}"})
-                .map(_color_z2, subset=["Z-score"]),
-                width="stretch",
-            )
+            render_clean_table(tbl)
