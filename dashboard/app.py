@@ -1,9 +1,17 @@
 import sys
 import os
+import faulthandler
 from pathlib import Path
 
 # Make project root importable from all page scripts
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# 세그폴트/SIGABRT 등 네이티브 크래시 시 C 레벨 스택을 파일로 남긴다.
+# 로컬에서 재현이 안 되는 크래시라 다음 발생 시 정확한 크래시 지점을
+# 잡기 위한 계측 — 평상시엔 오버헤드가 사실상 없다.
+_faulthandler_log = Path(__file__).resolve().parent.parent / "logs" / "faulthandler.log"
+_faulthandler_log.parent.mkdir(exist_ok=True)
+faulthandler.enable(file=open(_faulthandler_log, "a"), all_threads=True)
 
 import streamlit as st
 from dotenv import load_dotenv

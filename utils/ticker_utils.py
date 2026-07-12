@@ -18,6 +18,16 @@ from config.sources import (
     HK_CN_TICKER_MAP,
     TICKER_KR_NAME as _TICKER_KR_NAME,
 )
+from utils.net_timeout import call_with_timeout
+
+# pykrx "보조" 호출 안전장치 — KRX 서비스 장애 중엔 개별 호출이 (로그인
+# 재시도까지 겹쳐) 수십 초씩 블로킹될 수 있어, 전종목 루프를 그대로 돌리면
+# 스레드·소켓이 누적돼 리소스 고갈로 이어질 수 있다(세그폴트 인시던트 원인
+# 후보). 호출당 타임아웃 + 연속 실패 서킷브레이커 + 총 호출 수 상한으로
+# "보조"라는 원래 목적(FDR이 놓친 소수 종목명 보완) 이상으로 번지지 않게 막는다.
+_PYKRX_CALL_TIMEOUT = 5.0      # 호출 1건당 최대 대기(초)
+_PYKRX_MAX_CONSECUTIVE_FAILS = 3   # 연속 실패 시 전체 보조 단계 즉시 포기
+_PYKRX_MAX_SUPPLEMENT_CALLS = 30   # 이름 조회로 실제 소비할 pykrx 호출 수 상한
 
 # ── Static base map ────────────────────────────────────────────────────────────
 _NAME_TO_TICKER: dict[str, str] = {**KOSPI_TICKER_MAP, **NASDAQ_TICKER_MAP, **HK_CN_TICKER_MAP}
@@ -380,25 +390,42 @@ def _load_krx_stocks() -> dict[str, tuple[str, str]]:
         _KRX_CACHE_TS = time.time()
         return _KRX_CACHE
 
-    # pykrx 보조 (FDR 성공 시에만 실행, 인증 불필요한 경우)
+    # pykrx 보조 (FDR 성공 시에만 실행) — FDR이 놓친 소수 종목명만 보완하는
+    # 목적이므로, 아래 안전장치(타임아웃/서킷브레이커/호출 수 상한)를 절대
+    # 우회하지 말 것 (세그폴트 인시던트 원인 후보 — 상단 주석 참고).
     try:
         from pykrx import stock as krx
         from datetime import date
         today = date.today().strftime("%Y%m%d")
+        consecutive_fails = 0
+        calls_used = 0
         for market, suffix in [("KOSPI", ".KS"), ("KOSDAQ", ".KQ")]:
+            if consecutive_fails >= _PYKRX_MAX_CONSECUTIVE_FAILS or calls_used >= _PYKRX_MAX_SUPPLEMENT_CALLS:
+                break
             try:
-                tickers = krx.get_market_ticker_list(date=today, market=market)
-                for t in tickers:
-                    key = f"{t}{suffix}"
-                    if key not in result:
-                        try:
-                            name = krx.get_market_ticker_name(t)
-                            if name:
-                                result[key] = (name, market)
-                        except Exception:
-                            pass
+                tickers = call_with_timeout(
+                    krx.get_market_ticker_list, date=today, market=market,
+                    timeout=_PYKRX_CALL_TIMEOUT,
+                )
             except Exception:
-                pass
+                consecutive_fails += 1
+                continue
+            for t in tickers:
+                if consecutive_fails >= _PYKRX_MAX_CONSECUTIVE_FAILS or calls_used >= _PYKRX_MAX_SUPPLEMENT_CALLS:
+                    break
+                key = f"{t}{suffix}"
+                if key in result:
+                    continue
+                calls_used += 1
+                try:
+                    name = call_with_timeout(
+                        krx.get_market_ticker_name, t, timeout=_PYKRX_CALL_TIMEOUT,
+                    )
+                    consecutive_fails = 0
+                    if name:
+                        result[key] = (name, market)
+                except Exception:
+                    consecutive_fails += 1
     except (ImportError, Exception):
         pass
 

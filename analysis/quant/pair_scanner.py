@@ -36,6 +36,10 @@ from statsmodels.tsa.stattools import coint
 
 from analysis.quant.spread_diagnostics import copula_metrics, half_life, hurst_exponent
 from data.collectors.price_collector import PriceCollector
+from utils.net_timeout import call_with_timeout
+
+_PYKRX_CALL_TIMEOUT = 5.0
+_PYKRX_MAX_CONSECUTIVE_FAILS = 2
 
 
 # ── Static industry group definitions ────────────────────────────────────────
@@ -950,19 +954,30 @@ def _kr_peers_via_pykrx(ticker: str, top_n: int) -> "PeerGroup":
     code   = ticker[:-3]
     market = 'KOSPI' if suffix == '.KS' else 'KOSDAQ'
 
-    # Try up to 5 recent business days to find a date with data
+    # Try up to 5 recent business days to find a date with data.
+    # pykrx는 자체 timeout이 없어 KRX 장애 중엔 호출당 수십 초씩 블로킹될 수
+    # 있으므로 call_with_timeout으로 상한을 걸고, 연속 실패 시 나머지 날짜는
+    # 건너뛰고 조기 포기한다(세그폴트 인시던트 원인 후보였던 무제한 재시도 방지).
     df = None
     today = date.today()
+    consecutive_fails = 0
     for delta in range(10):
+        if consecutive_fails >= _PYKRX_MAX_CONSECUTIVE_FAILS:
+            break
         d = today - timedelta(days=delta)
         if d.weekday() >= 5:
             continue
         try:
-            candidate = stock.get_market_sector_classifications(d.strftime('%Y%m%d'), market)
+            candidate = call_with_timeout(
+                stock.get_market_sector_classifications, d.strftime('%Y%m%d'), market,
+                timeout=_PYKRX_CALL_TIMEOUT,
+            )
+            consecutive_fails = 0
             if candidate is not None and not candidate.empty:
                 df = candidate
                 break
         except Exception:
+            consecutive_fails += 1
             continue
 
     if df is None or df.empty:

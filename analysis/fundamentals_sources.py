@@ -8,6 +8,10 @@
 from __future__ import annotations
 
 from analysis.fundamentals_groups import GROUP_FIELDS
+from utils.net_timeout import call_with_timeout
+
+_PYKRX_CALL_TIMEOUT = 5.0
+_PYKRX_MAX_CONSECUTIVE_FAILS = 2
 
 
 def _empty() -> dict:
@@ -135,7 +139,13 @@ def from_naver(ticker: str) -> dict:
 
 
 def from_pykrx(ticker: str) -> dict:
-    """네이버도 실패했을 때 최후 보조 — PER/PBR만 (pykrx는 재무제표 API가 없음)."""
+    """네이버도 실패했을 때 최후 보조 — PER/PBR만 (pykrx는 재무제표 API가 없음).
+
+    pykrx는 자체 timeout이 없고 KRX 서비스 장애 중엔 호출당 수십 초씩
+    블로킹될 수 있어, call_with_timeout으로 호출 하나하나에 상한을 걸고
+    연속 실패 시 나머지 날짜는 시도하지 않고 조기 포기한다(무의미한
+    반복 호출 방지 — 세그폴트 인시던트 원인 후보였던 무제한 재시도 패턴).
+    """
     out = _empty()
     try:
         from datetime import date, timedelta
@@ -143,9 +153,21 @@ def from_pykrx(ticker: str) -> dict:
 
         code = ticker.split(".")[0]
         d = date.today()
+        consecutive_fails = 0
         for _ in range(10):
+            if consecutive_fails >= _PYKRX_MAX_CONSECUTIVE_FAILS:
+                break
             ds = d.strftime("%Y%m%d")
-            fdf = krx.get_market_fundamental_by_date(ds, ds, code)
+            try:
+                fdf = call_with_timeout(
+                    krx.get_market_fundamental_by_date, ds, ds, code,
+                    timeout=_PYKRX_CALL_TIMEOUT,
+                )
+            except Exception:
+                consecutive_fails += 1
+                d -= timedelta(days=1)
+                continue
+            consecutive_fails = 0
             if fdf is not None and not fdf.empty:
                 row = fdf.iloc[-1]
                 per = float(row.get("PER", 0) or 0)
