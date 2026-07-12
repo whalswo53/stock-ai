@@ -19,6 +19,11 @@ POLARITY_BG = {"bullish": "#eaf6ee", "neutral": "#fdf6e3", "bearish": "#fbeaea"}
 POLARITY_ICON = {"bullish": "🟢", "neutral": "🟡", "bearish": "🔴"}
 POLARITY_LABEL = {"bullish": "강세", "neutral": "중립", "bearish": "약세"}
 
+# CLOSE/청산 전용 — WAIT과 같은 neutral(앰버)이 아니라 별도 슬레이트로 구분한다
+# (표 디자인 스펙 지정). POLARITY_COLOR/BG는 그대로 두고 이 케이스만 별도 처리.
+SLATE_COLOR = "#64748b"
+SLATE_BG = "rgba(100,116,139,0.14)"
+
 _FALLBACK_COLOR = "#888888"
 _FALLBACK_BG = "rgba(128,128,128,0.08)"
 
@@ -132,31 +137,106 @@ def _cell_polarity(value) -> str | None:
     return "neutral"
 
 
-def render_clean_table(df, judgment_col: str | list[str] | None = None) -> None:
-    """세로 격자선 없는 표 — 첫 컬럼(레이블)은 좌측, 나머지 값은 우측 정렬,
-    헤더에만 얇은 하단 보더. judgment_col로 지정한 컬럼은 값을 _cell_polarity로
-    판정해 POLARITY_COLOR로 색칠한다(색상표는 render_signal_card와 공유)."""
+_DATE_TEXT_RE = _re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_NUMERIC_LEADING_RE = _re.compile(r"^[+\-−±₩$]?\s*[\d,]*\.?\d")
+
+
+def _is_numeric_text(text: str) -> bool:
+    """이 셀이 '숫자 값'인지 — 전부 숫자로 파싱되는지가 아니라 부호/통화기호로
+    시작해 숫자로 이어지는지만 본다("15.4일"/"±0.79σ"처럼 단위가 붙어도 숫자
+    컬럼으로 인식). "삼성전자 (005930.KS)"처럼 숫자가 안쪽에 섞인 텍스트를
+    전부 걷어내 파싱하면 오탐(false positive)이 나므로 그 방식은 쓰지 않는다.
+    "2026-07-06" 같은 날짜는 숫자로 시작해도 예외로 텍스트 취급한다."""
+    t = text.strip()
+    if _DATE_TEXT_RE.match(t):
+        return False
+    return bool(_NUMERIC_LEADING_RE.match(t))
+
+
+def _is_numeric_col(values: list[str]) -> bool:
+    """열 하나가 '숫자 컬럼'인지 — 값 대다수(80%+)가 부호/통화기호/쉼표 등을
+    걷어내고 숫자로 파싱되면 숫자 컬럼(우측 정렬 + tabular-nums)으로 본다."""
+    non_empty = [v for v in values if v not in ("", "N/A", "—", "-")]
+    if not non_empty:
+        return False
+    hits = sum(1 for v in non_empty if _is_numeric_text(v))
+    return hits / len(non_empty) >= 0.8
+
+
+def _badge_html(raw) -> str:
+    """판정/신호 셀을 pill 배지로 렌더. CLOSE/청산만 neutral(앰버) 대신
+    SLATE로 구분하고, 그 외 극성 색상은 POLARITY_COLOR/POLARITY_BG 그대로 재사용."""
+    text = _html.escape(str(raw))
+    leading = _re.match(r"^[A-Za-z_]+", str(raw).strip())
+    token = leading.group(0).upper() if leading else ""
+    if token == "CLOSE":
+        color, bg = SLATE_COLOR, SLATE_BG
+    else:
+        polarity = _cell_polarity(raw)
+        color = POLARITY_COLOR.get(polarity, _FALLBACK_COLOR)
+        bg = POLARITY_BG.get(polarity, _FALLBACK_BG)
+    return (
+        f'<span style="display:inline-block;padding:2px 10px;border-radius:999px;'
+        f'background:{bg};color:{color};font-weight:600;font-size:12px;'
+        f'white-space:nowrap">{text}</span>'
+    )
+
+
+def render_clean_table(
+    df,
+    judgment_col: str | list[str] | None = None,
+    label_col: str | list[str] | None = None,
+) -> None:
+    """세로 격자선 없는 공용 표 (Claude Design 확정 스펙 — 1단계: pill 배지).
+
+    - 세로 격자선 없음, border-collapse. thead 배경 #f7f8fa, 행 구분은
+      border-bottom만.
+    - 숫자로 인식되는 컬럼은 우측 정렬 + tabular-nums. 그 외 텍스트 컬럼은
+      좌측 정렬(label_col로 지정한 컬럼만 font-weight:600 굵게 — 종목명·
+      패턴명 등 핵심 식별값).
+    - judgment_col: pill 배지로 렌더(_badge_html, POLARITY_COLOR/BG 재사용
+      + CLOSE는 SLATE로 구분).
+
+    주의: best_col/highlight_row_when(최적값 강조·행 하이라이트)은 세그폴트
+    인시던트(2026-07-13) 원인 격리를 위해 단계적으로 재도입 중 — 아직 없음.
+    """
     judgment_cols = {judgment_col} if isinstance(judgment_col, str) else set(judgment_col or [])
+    label_cols = {label_col} if isinstance(label_col, str) else set(label_col or [])
     cols = list(df.columns)
 
+    numeric_cols = {
+        c for c in cols
+        if c not in judgment_cols and _is_numeric_col([str(v) for v in df[c]])
+    }
+
+    def _col_align(c: str) -> str:
+        return "right" if (c in numeric_cols or c in judgment_cols) else "left"
+
     header_cells = "".join(
-        f'<th style="text-align:{"left" if i == 0 else "right"};padding:6px 10px;'
-        f'font-size:11px;color:#888;font-weight:600;white-space:nowrap;'
-        f'border-bottom:1px solid rgba(128,128,128,0.35)">{_html.escape(str(c))}</th>'
-        for i, c in enumerate(cols)
+        f'<th style="text-align:{_col_align(c)};padding:6px 10px;'
+        f'font-size:11px;color:{SLATE_COLOR};font-weight:600;white-space:nowrap;'
+        f'background:#f7f8fa;border-bottom:1px solid rgba(100,116,139,0.25)">'
+        f'{_html.escape(str(c))}</th>'
+        for c in cols
     )
 
     body_rows = []
     for _, row in df.iterrows():
         cells = []
-        for i, c in enumerate(cols):
+        for c in cols:
             raw = row[c]
-            text = _html.escape("" if raw is None else str(raw))
-            align = "left" if i == 0 else "right"
+            align = _col_align(c)
             if c in judgment_cols:
-                color = POLARITY_COLOR.get(_cell_polarity(raw), _FALLBACK_COLOR)
-                text = f'<span style="color:{color};font-weight:700">{text}</span>'
-            cells.append(f'<td style="text-align:{align};padding:6px 10px;font-size:13px">{text}</td>')
+                text = _badge_html(raw)
+            else:
+                text = _html.escape("" if raw is None else str(raw))
+                if c in label_cols:
+                    text = f'<span style="font-weight:600">{text}</span>'
+            numeric_style = "font-variant-numeric:tabular-nums;" if c in numeric_cols else ""
+            cells.append(
+                f'<td style="text-align:{align};padding:6px 10px;font-size:13px;'
+                f'{numeric_style}border-bottom:1px solid rgba(100,116,139,0.12)">{text}</td>'
+            )
         body_rows.append(f"<tr>{''.join(cells)}</tr>")
 
     st.markdown(

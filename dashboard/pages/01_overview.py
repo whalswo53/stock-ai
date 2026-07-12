@@ -532,10 +532,10 @@ else:
                 })
 
             st.caption(f"📊 집계 기준: **{pool_label}** · 수익률 측정 {horizon}일 후")
-            render_clean_table(pd.DataFrame(main_rows), judgment_col="판정")
+            render_clean_table(pd.DataFrame(main_rows), judgment_col="판정", label_col="패턴")
 
             st.markdown("**복합 신호 성과** — 조건 동시 충족 시 승률 (평균수익, 표본)")
-            render_clean_table(pd.DataFrame(combo_rows))
+            render_clean_table(pd.DataFrame(combo_rows), label_col="패턴")
             st.caption(
                 f"거래량 동반 = Vol_Ratio ≥ {candle_patterns.VOL_ACCOMPANY} · "
                 f"RSI 결합 = 강세+RSI≤{candle_patterns.RSI_LOW} / 약세+RSI≥{candle_patterns.RSI_HIGH} · "

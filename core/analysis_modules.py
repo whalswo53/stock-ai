@@ -281,7 +281,7 @@ def candle_section(ctx: dict) -> AnalysisResult:
             f"수익률 측정 {horizon}일 후 · 이 종목 5년 히스토리 기준 "
             f"(표본 {candle_patterns.MIN_SAMPLES}회 미만은 판단 불가)"
         )
-        render_clean_table(pd.DataFrame(rows), judgment_col="판정")
+        render_clean_table(pd.DataFrame(rows), judgment_col="판정", label_col="패턴")
 
     return AnalysisResult(
         title="캔들 패턴", markdown=markdown, json={"캔들_패턴": json_hits}, render=_render,
