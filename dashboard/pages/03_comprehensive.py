@@ -20,12 +20,15 @@ import streamlit as st
 
 import core.analysis_modules  # noqa: F401 — import 시 @register 모듈들이 등록됨
 from analysis.technical.indicators import TechnicalIndicators
-from core.analysis_registry import run_all
+from core.analysis_registry import aggregate_verdict, run_all
 from data.collectors.price_collector import PriceCollector
 from config.sources import TICKER_KR_NAME
+from ui.components import render_signal_card, render_verdict_banner
 from utils.clipboard import copy_button
 from utils.ticker_utils import detect_market, is_kr, resolve_currency
 from utils.search_widget import ticker_search_widget
+
+_POLARITY_VALUE_LABEL = {"bullish": "강세", "neutral": "중립", "bearish": "약세"}
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -92,14 +95,35 @@ with st.spinner("등록된 분석 모듈 실행 중… (기술적 · 캔들 · �
 
 _NUM_EMOJI = [f"{i}️⃣" for i in range(1, 10)]  # 1️⃣ 2️⃣ … 9️⃣
 
-for i, r in enumerate(results):
-    label = _NUM_EMOJI[i] if i < len(_NUM_EMOJI) else f"{i + 1}."
-    st.markdown(f"### {label}  {r.title}")
-    if r.render:
-        r.render()
-    else:
-        st.markdown(r.markdown)
-    st.divider()
+# ── 종합 판정 배너 ────────────────────────────────────────────────────────────
+verdict = aggregate_verdict(results)
+render_verdict_banner(
+    verdict["label"], verdict["confidence"], verdict["polarity"],
+    sub_text=(
+        f"강세 {verdict['n_bull']} · 중립 {verdict['n_neu']} · 약세 {verdict['n_bear']}"
+        f"  (총 {verdict['total']}개 신호 집계, 방향성 없는 모듈 제외)"
+    ),
+)
+
+# ── 신호 pill 한 줄 — results 길이만큼 자동 생성. 등록 모듈이 늘어나면 그대로 늘어난다 ──
+cols = st.columns(len(results))
+for col, r in zip(cols, results):
+    with col:
+        render_signal_card(
+            r.title,
+            _POLARITY_VALUE_LABEL.get(r.polarity, "정보"),
+            "",
+            polarity=r.polarity,
+        )
+
+# ── 세부 — 탭 목록도 results에서 자동 생성 ───────────────────────────────────────
+tabs = st.tabs([r.title for r in results])
+for tab, r in zip(tabs, results):
+    with tab:
+        if r.render:
+            r.render()
+        else:
+            st.markdown(r.markdown)
 
 # ── 대시보드용 통합 JSON ────────────────────────────────────────────────────────
 merged_json: dict = {}

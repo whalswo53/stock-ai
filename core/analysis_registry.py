@@ -20,6 +20,7 @@ class AnalysisResult:
     markdown: str                                   # AI 프롬프트/텍스트 표시용 — 항상 채워야 함
     json: dict = field(default_factory=dict)         # 대시보드 JSON 병합용
     render: Callable[[], None] | None = None         # 선택: 차트·게이지 등 리치 UI. 없으면 markdown만 표시
+    polarity: str | None = None                      # "bullish" | "neutral" | "bearish" | None(집계 제외)
 
 
 @dataclass
@@ -44,3 +45,30 @@ def run_all(ctx: dict) -> list[AnalysisResult]:
         except Exception as e:
             out.append(AnalysisResult(title=m.name, markdown=f"⚠️ {m.name} 실패: {e}"))
     return out
+
+
+def aggregate_verdict(results: list[AnalysisResult]) -> dict:
+    """등록 모듈들의 polarity를 다수결로 집계해 종합 판정을 낸다.
+
+    polarity=None인 모듈(뉴스 감성처럼 방향성이 애매한 것)은 자동 제외된다.
+    신뢰도는 단순 다수결 비율로 시작한 것 — 추후 모듈 가중치를 반영해
+    조정 가능하다.
+    """
+    polarities = [r.polarity for r in results if r.polarity]
+    n_bull = polarities.count("bullish")
+    n_bear = polarities.count("bearish")
+    n_neu = polarities.count("neutral")
+    total = len(polarities)
+
+    if total and n_bull > n_bear and n_bull >= total * 0.5:
+        signal, label, polarity = "BUY", "매수 우위", "bullish"
+    elif total and n_bear > n_bull and n_bear >= total * 0.5:
+        signal, label, polarity = "SELL", "매도 우위", "bearish"
+    else:
+        signal, label, polarity = "HOLD", "관망", "neutral"
+
+    confidence = max(n_bull, n_bear, n_neu) / total if total else 0.0
+    return {
+        "signal": signal, "label": label, "polarity": polarity, "confidence": confidence,
+        "n_bull": n_bull, "n_neu": n_neu, "n_bear": n_bear, "total": total,
+    }

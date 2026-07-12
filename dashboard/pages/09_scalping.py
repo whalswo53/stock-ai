@@ -23,6 +23,7 @@ from plotly.subplots import make_subplots
 from config.sources import TICKER_KR_NAME
 from data.collectors.market_sentiment import MarketSentimentCollector, prompt_snippet
 from data.collectors.price_collector import PriceCollector
+from ui.components import polarity_from_signal, render_signal_card, render_verdict_banner
 from utils.ticker_utils import resolve_ticker as _resolve_base, detect_market, is_kr, fmt_price
 from utils.clipboard import copy_button
 from utils.search_widget import ticker_search_widget
@@ -44,7 +45,6 @@ PERIOD_OPTIONS = {"1개월": "1mo", "2개월": "2mo", "3개월": "3mo"}
 
 UP   = "#26a69a"
 DOWN = "#ef5350"
-WAIT = "#9E9E9E"
 
 MA_COLORS = {5: "#FF9800", 10: "#2196F3", 20: "#9C27B0"}
 
@@ -346,9 +346,15 @@ if quote is not None:
 st.divider()
 
 overall = sig["overall"]
-overall_color = {"BUY": UP, "SELL": DOWN, "WAIT": WAIT}[overall]
-overall_icon  = {"BUY": "🟢", "SELL": "🔴", "WAIT": "⏸"}[overall]
 overall_label = {"BUY": "매수 신호", "SELL": "매도 신호", "WAIT": "관망"}[overall]
+overall_polarity = polarity_from_signal(overall)
+
+# 신뢰도 — 감지된 신호 중 종합 방향과 일치하는 비율 (신호가 없으면 관망을 100% 확신)
+_signals = sig["signals"]
+if _signals and overall in ("BUY", "SELL"):
+    _confidence = sum(1 for s in _signals if s["direction"] == overall) / len(_signals)
+else:
+    _confidence = 1.0 if not _signals else 0.5
 
 # Volume spike alert
 if sig["vol_spike"] and show_vol_spike:
@@ -361,17 +367,7 @@ if sig["vol_spike"] and show_vol_spike:
 col_main, col_sigs = st.columns([1, 2])
 
 with col_main:
-    st.markdown(
-        f"""<div style="
-            background:rgba({','.join(str(int(overall_color.lstrip('#')[i:i+2], 16)) for i in (0,2,4))},0.18);
-            border:2px solid {overall_color};border-radius:12px;
-            padding:20px;text-align:center">
-          <div style="font-size:36px;margin-bottom:4px">{overall_icon}</div>
-          <div style="font-size:22px;font-weight:800;color:{overall_color}">{overall_label}</div>
-          <div style="font-size:12px;color:#aaa;margin-top:6px">종합 신호 (단타 기준)</div>
-        </div>""",
-        unsafe_allow_html=True,
-    )
+    render_verdict_banner(overall_label, _confidence, overall_polarity, sub_text="종합 신호 (단타 기준)")
 
 with col_sigs:
     if sig["signals"]:
@@ -393,14 +389,22 @@ with col_sigs:
     # RSI + BB%B quick read
     rsi_val = sig["rsi"]
     bb_pct  = sig["bb_pct"]
-    rsi_c   = DOWN if rsi_val >= RSI_OB else (UP if rsi_val <= RSI_OS else "#888")
-    bb_c    = DOWN if bb_pct >= 0.9 else (UP if bb_pct <= 0.1 else "#888")
+    rsi_polarity = "bearish" if rsi_val >= RSI_OB else "bullish" if rsi_val <= RSI_OS else "neutral"
+    bb_polarity  = "bearish" if bb_pct >= 0.85 else "bullish" if bb_pct <= 0.15 else "neutral"
 
     r1, r2 = st.columns(2)
-    r1.metric(f"RSI({ST_RSI_PERIOD})", f"{rsi_val:.1f}",
-              "과매수" if rsi_val >= RSI_OB else ("과매도" if rsi_val <= RSI_OS else "중립"))
-    r2.metric("BB 위치(%B)", f"{bb_pct:.2f}",
-              "상단 근접" if bb_pct >= 0.85 else ("하단 근접" if bb_pct <= 0.15 else "중앙권"))
+    with r1:
+        render_signal_card(
+            f"RSI({ST_RSI_PERIOD})", f"{rsi_val:.1f}",
+            "과매수" if rsi_val >= RSI_OB else ("과매도" if rsi_val <= RSI_OS else "중립"),
+            polarity=rsi_polarity,
+        )
+    with r2:
+        render_signal_card(
+            "BB 위치(%B)", f"{bb_pct:.2f}",
+            "상단 근접" if bb_pct >= 0.85 else ("하단 근접" if bb_pct <= 0.15 else "중앙권"),
+            polarity=bb_polarity,
+        )
 
 
 # ── Scalping chart ─────────────────────────────────────────────────────────────

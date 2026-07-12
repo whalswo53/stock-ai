@@ -332,9 +332,10 @@ with st.sidebar:
     st.divider()
     n_acc = len([h for h in holdings_all if h["group_type"] == GROUP_ACCUMULATING])
     n_hld = len([h for h in holdings_all if h["group_type"] == GROUP_HOLDING])
-    c1, c2 = st.columns(2)
-    c1.metric("모으는 중", n_acc)
-    c2.metric("보유 중",   n_hld)
+    with st.container(border=True):
+        c1, c2 = st.columns(2)
+        c1.metric("모으는 중", n_acc)
+        c2.metric("보유 중",   n_hld)
 
 
 # ── Main content ──────────────────────────────────────────────────────────────
@@ -391,11 +392,12 @@ with tab_dash:
     total_pnl   = total_value - total_cost
     total_ret   = (total_pnl / total_cost * 100) if total_cost > 0 else 0.0
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("총 평가금액",  f"₩{total_value:,.0f}" if total_value < 1e8 else f"₩{total_value/1e8:.2f}억")
-    m2.metric("총 매입금액",  f"₩{total_cost:,.0f}"  if total_cost  < 1e8 else f"₩{total_cost/1e8:.2f}억")
-    m3.metric("평가손익",     f"₩{total_pnl:+,.0f}", delta_color="normal")
-    m4.metric("전체 수익률",  f"{total_ret:+.2f}%",   delta=f"{total_pnl:+,.0f}")
+    with st.container(border=True):
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("총 평가금액",  f"₩{total_value:,.0f}" if total_value < 1e8 else f"₩{total_value/1e8:.2f}억")
+        m2.metric("총 매입금액",  f"₩{total_cost:,.0f}"  if total_cost  < 1e8 else f"₩{total_cost/1e8:.2f}억")
+        m3.metric("평가손익",     f"₩{total_pnl:+,.0f}", delta_color="normal")
+        m4.metric("전체 수익률",  f"{total_ret:+.2f}%",   delta=f"{total_pnl:+,.0f}")
 
     st.divider()
     st.subheader("종목별 현황")
@@ -514,10 +516,11 @@ with tab_acc:
         acc_total_value    = df_acc["평가금액_KRW"].sum()
         acc_total_pnl      = acc_total_value - acc_total_invested
         acc_ret            = (acc_total_pnl / acc_total_invested * 100) if acc_total_invested > 0 else 0.0
-        am1, am2, am3 = st.columns(3)
-        am1.metric("총 투자금액",  f"₩{acc_total_invested:,.0f}")
-        am2.metric("총 평가금액",  f"₩{acc_total_value:,.0f}")
-        am3.metric("누적 수익률",  f"{acc_ret:+.2f}%")
+        with st.container(border=True):
+            am1, am2, am3 = st.columns(3)
+            am1.metric("총 투자금액",  f"₩{acc_total_invested:,.0f}")
+            am2.metric("총 평가금액",  f"₩{acc_total_value:,.0f}")
+            am3.metric("누적 수익률",  f"{acc_ret:+.2f}%")
         st.divider()
 
         for _, row in df_acc.iterrows():
@@ -726,10 +729,11 @@ with tab_hld:
         hld_value = df_hld["평가금액_KRW"].sum()
         hld_pnl   = hld_value - hld_cost
         hld_ret   = (hld_pnl / hld_cost * 100) if hld_cost > 0 else 0.0
-        h1, h2, h3 = st.columns(3)
-        h1.metric("평가금액", f"₩{hld_value:,.0f}")
-        h2.metric("평가손익", f"₩{hld_pnl:+,.0f}")
-        h3.metric("수익률",   f"{hld_ret:+.2f}%")
+        with st.container(border=True):
+            h1, h2, h3 = st.columns(3)
+            h1.metric("평가금액", f"₩{hld_value:,.0f}")
+            h2.metric("평가손익", f"₩{hld_pnl:+,.0f}")
+            h3.metric("수익률",   f"{hld_ret:+.2f}%")
         st.divider()
 
         for _, row in df_hld.iterrows():

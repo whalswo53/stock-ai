@@ -21,6 +21,7 @@ from analysis.technical.signals import score as tech_score
 from analysis.ai.claude_analyst import ClaudeAnalyst
 from memory.user_memory import UserMemory
 from memory.pattern_analyzer import PatternAnalyzer
+from ui.components import polarity_from_signal, render_signal_card
 from utils.ticker_utils import detect_market, resolve_ticker as _resolve_base
 from utils.clipboard import copy_button as _copy_button
 from utils.search_widget import ticker_search_widget
@@ -210,12 +211,22 @@ try:
 except (TypeError, ValueError):
     rsi_val, macd_v, macd_s, close_v = 50, 0, 0, 0
 
-signal_emoji = "🟢" if t_score > 0.15 else ("🔴" if t_score < -0.15 else "🟡")
+score_polarity = "bullish" if t_score > 0.15 else "bearish" if t_score < -0.15 else "neutral"
+rsi_polarity = "bullish" if rsi_val < 30 else "bearish" if rsi_val > 70 else "neutral"
+macd_polarity = "bullish" if macd_v > macd_s else "bearish"
+
 m1, m2, m3, m4 = st.columns(4)
-m1.metric("현재가", f"{close_v:,.0f}")
-m2.metric("기술 점수", f"{t_score:+.2f}", f"{signal_emoji}")
-m3.metric("RSI", f"{rsi_val:.1f}", "과매도" if rsi_val < 30 else ("과매수" if rsi_val > 70 else "중립"))
-m4.metric("MACD", "골든크로스" if macd_v > macd_s else "데드크로스")
+with m1:
+    render_signal_card("현재가", f"{close_v:,.0f}", "", polarity=None)
+with m2:
+    render_signal_card("기술 점수", f"{t_score:+.2f}", "", polarity=score_polarity)
+with m3:
+    render_signal_card("RSI", f"{rsi_val:.1f}",
+                        "과매도" if rsi_val < 30 else ("과매수" if rsi_val > 70 else "중립"),
+                        polarity=rsi_polarity)
+with m4:
+    render_signal_card("MACD", "골든크로스" if macd_v > macd_s else "데드크로스", "",
+                        polarity=macd_polarity)
 
 st.divider()
 
@@ -271,14 +282,23 @@ if paste_text.strip():
     sent_emoji = {"positive": "😀 긍정", "negative": "😟 부정", "neutral": "😐 중립"}.get(
         parsed.sentiment or "neutral", "😐 중립"
     )
-    r1, r2, r3, r4 = st.columns(4)
-    r1.metric("감지된 시그널", f"{sig_color} {parsed.signal}")
-    r2.metric("확신도", f"{parsed.confidence:.0%}")
-    r3.metric("뉴스 감성", sent_emoji)
-    r4.metric(
-        "목표가",
-        f"{parsed.price_target:,.0f}" if parsed.price_target else "—",
+    sent_polarity = {"positive": "bullish", "negative": "bearish", "neutral": "neutral"}.get(
+        parsed.sentiment or "neutral"
     )
+    r1, r2, r3, r4 = st.columns(4)
+    with r1:
+        render_signal_card("감지된 시그널", f"{sig_color} {parsed.signal}", "",
+                            polarity=polarity_from_signal(parsed.signal))
+    with r2:
+        render_signal_card("확신도", f"{parsed.confidence:.0%}", "", polarity=None)
+    with r3:
+        render_signal_card("뉴스 감성", sent_emoji, "", polarity=sent_polarity)
+    with r4:
+        render_signal_card(
+            "목표가",
+            f"{parsed.price_target:,.0f}" if parsed.price_target else "—",
+            "", polarity=None,
+        )
 
     if parsed.reasons and parsed.reasons[0] != "JSON 블록을 찾지 못했습니다 — 아래에서 직접 시그널을 선택하세요.":
         st.markdown("**분석 근거:**")

@@ -28,6 +28,7 @@ from analysis.quant.pair_scanner import (
 )
 from config.sources import TICKER_KR_NAME, KOSPI_TICKER_MAP, NASDAQ_TICKER_MAP, HK_CN_TICKER_MAP
 from data.collectors.price_collector import PriceCollector
+from ui.components import polarity_from_signal, render_signal_card
 
 # ── Palette ───────────────────────────────────────────────────────────────────
 OLS_COLOR    = "#2196F3"
@@ -766,7 +767,9 @@ with tab_direct:
         alpha_pct_key = "10%" if direct_alpha >= 0.10 else "5%"
         c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
         coint_ok = coint.is_cointegrated
-        c1.metric("검정 결과", "공적분 있음 ✅" if coint_ok else "공적분 없음 ❌")
+        with c1:
+            render_signal_card("검정 결과", "공적분 있음 ✅" if coint_ok else "공적분 없음 ❌", "",
+                                polarity="bullish" if coint_ok else "bearish")
         c2.metric("p-value", f"{coint.pvalue:.4f}",
                   help=f"낮을수록 공적분 관계가 강합니다. {direct_alpha:.2f} 미만 = 통계적으로 유의")
         c3.metric("검정 통계량", f"{coint.test_stat:.3f}",
@@ -924,8 +927,12 @@ with tab_direct:
         st.subheader("4. 종합 신호")
 
         s1, s2, s3 = st.columns(3)
-        s1.metric(f"{label_a} 신호", result.signal_a)
-        s2.metric(f"{label_b} 신호", result.signal_b)
+        with s1:
+            render_signal_card(f"{label_a} 신호", result.signal_a, "",
+                                polarity=polarity_from_signal(result.signal_a))
+        with s2:
+            render_signal_card(f"{label_b} 신호", result.signal_b, "",
+                                polarity=polarity_from_signal(result.signal_b))
         s3.metric(
             "앙상블 Z-score",
             f"{result.composite_zscore:+.3f}",
@@ -991,12 +998,13 @@ with tab_direct:
 
         dc1, dc2, dc3, dc4 = st.columns(4)
         hurst_ok = math.isfinite(d_hurst) and d_hurst < 0.5
-        dc1.metric(
-            "Hurst 지수",
-            f"{d_hurst:.3f}" if math.isfinite(d_hurst) else "N/A",
-            "평균회귀 ✅" if hurst_ok else "추세성 ⚠️",
-            delta_color="normal" if hurst_ok else "inverse",
-        )
+        with dc1:
+            render_signal_card(
+                "Hurst 지수",
+                f"{d_hurst:.3f}" if math.isfinite(d_hurst) else "N/A",
+                "평균회귀 ✅" if hurst_ok else "추세성 ⚠️",
+                polarity="bullish" if hurst_ok else "bearish",
+            )
         dc2.metric(
             "반감기",
             f"{d_hl:.1f}일" if math.isfinite(d_hl) else "∞ (비회귀)",
@@ -1231,7 +1239,9 @@ with tab_direct:
 
         c1, c2, c3 = st.columns([2, 1, 1])
         mr_ok = mr.is_mean_reverting
-        c1.metric("검정 결과", "평균회귀 가능 ✅" if mr_ok else "단위근 존재 ❌")
+        with c1:
+            render_signal_card("검정 결과", "평균회귀 가능 ✅" if mr_ok else "단위근 존재 ❌", "",
+                                polarity="bullish" if mr_ok else "bearish")
         c2.metric("ADF p-value", f"{mr.adf_pvalue:.4f}",
                   help=f"낮을수록 평균회귀 성질이 강합니다. {direct_alpha:.2f} 미만 = 통계적으로 유의")
         hl = mr.half_life_days
@@ -1299,7 +1309,9 @@ with tab_direct:
         st.subheader("3. 현재 신호")
 
         s1, s2 = st.columns(2)
-        s1.metric(f"{single_label} 신호", mr.signal)
+        with s1:
+            render_signal_card(f"{single_label} 신호", mr.signal, "",
+                                polarity=polarity_from_signal(mr.signal))
         z_disp = f"{mr.zscore_latest:+.3f}" if math.isfinite(mr.zscore_latest) else "N/A"
         s2.metric(
             "현재 Z-score", z_disp,

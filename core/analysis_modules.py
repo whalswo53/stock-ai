@@ -33,6 +33,7 @@ from core.analysis_registry import AnalysisResult, register
 from data.collectors.market_sentiment import MarketSentimentCollector, score_to_color
 from data.collectors.news_collector import NewsCollector
 from data.collectors.price_collector import PriceCollector
+from ui.components import polarity_from_signal, render_signal_card
 from utils.ticker_utils import fmt_price_currency
 
 
@@ -71,6 +72,13 @@ def technical_section(ctx: dict) -> AnalysisResult:
     bb_interp    = ("상단 근접 ⚠️" if bb_pct >= 0.85 else "하단 근접 💡" if bb_pct <= 0.15 else f"중앙권 ({bb_pct:.0%})")
     trend_interp = "단기 상승" if ma5 > ma20 and ma20 > 0 else ("단기 하락" if ma5 < ma20 and ma20 > 0 else "—")
     sig_label    = "매수 관심 🟢" if t_score > 0.15 else ("매도 주의 🔴" if t_score < -0.15 else "중립 ⏸")
+
+    # 극성(polarity) — 텍스트 라벨과 별개로 이미 계산된 수치 기준에서 직접 판정한다
+    # (라벨 문자열을 파싱하지 않으므로 이모지·문구가 바뀌어도 색상 버그가 재발하지 않음).
+    rsi_polarity = "bearish" if rsi_val >= 70 else "bullish" if rsi_val <= 30 else "neutral"
+    macd_polarity = "bullish" if macd_v > macd_s else "bearish"
+    bb_polarity = "bearish" if bb_pct >= 0.85 else "bullish" if bb_pct <= 0.15 else "neutral"
+    score_polarity = "bullish" if t_score > 0.15 else "bearish" if t_score < -0.15 else "neutral"
 
     price_hist = df.tail(5)[["Open", "High", "Low", "Close", "Volume"]].to_string(
         float_format=lambda x: f"{x:,.2f}"
@@ -126,11 +134,17 @@ def technical_section(ctx: dict) -> AnalysisResult:
 
     def _render() -> None:
         c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("현재가", _price(ctx, close), f"{chg_pct:+.2f}%")
-        c2.metric("RSI (14)", f"{rsi_val:.1f}", rsi_interp)
-        c3.metric("MACD", "골든" if macd_v > macd_s else "데드", macd_interp)
-        c4.metric("BB 위치", f"{bb_pct:.0%}", bb_interp)
-        c5.metric("기술 점수", f"{t_score:+.2f}", sig_label)
+        with c1:
+            render_signal_card("현재가", _price(ctx, close), f"{chg_pct:+.2f}%",
+                                polarity="bullish" if chg_pct > 0 else "bearish" if chg_pct < 0 else "neutral")
+        with c2:
+            render_signal_card("RSI (14)", f"{rsi_val:.1f}", rsi_interp, polarity=rsi_polarity)
+        with c3:
+            render_signal_card("MACD", "골든" if macd_v > macd_s else "데드", macd_interp, polarity=macd_polarity)
+        with c4:
+            render_signal_card("BB 위치", f"{bb_pct:.0%}", bb_interp, polarity=bb_polarity)
+        with c5:
+            render_signal_card("기술 점수", f"{t_score:+.2f}", sig_label, polarity=score_polarity)
 
         st.caption(
             f"📐 {n_days}거래일 구간({span_start:%Y-%m-%d}~{span_end:%Y-%m-%d}) "
@@ -181,6 +195,7 @@ def technical_section(ctx: dict) -> AnalysisResult:
             "레인지_위치_pct": range_pos_pct, "MA50": ma50_val, "MA200": ma200_val,
         },
         render=_render,
+        polarity=score_polarity,
     )
 
 
@@ -262,14 +277,34 @@ def candle_section(ctx: dict) -> AnalysisResult:
 # 3. 밸류에이션
 # ═══════════════════════════════════════════════════════════════════════════
 
+def _per_polarity(fundamentals: dict) -> str | None:
+    """PER 단순 임계값 휴리스틱 — 업종 평균 데이터가 없어 절대 수준으로만 판단.
+    극단적으로 싸거나(딥밸류) 비싼(과열) 경우만 방향성을 주고, 그 사이는 중립."""
+    per = fundamentals.get("밸류에이션", {}).get("PER")
+    if per in (None, "N/A"):
+        return None
+    try:
+        per_val = float(per)
+    except (TypeError, ValueError):
+        return None
+    if per_val <= 0:
+        return None  # 적자 등으로 PER이 의미 없는 구간
+    if per_val < 8:
+        return "bullish"
+    if per_val > 40:
+        return "bearish"
+    return "neutral"
+
+
 @register("밸류에이션", order=30)
 def valuation_section(ctx: dict) -> AnalysisResult:
     fundamentals = get_fundamentals(ctx)
-    markdown = (
-        "펀더멘털 데이터 미제공" if is_fully_missing(fundamentals)
-        else to_markdown_table(fundamentals)
+    missing = is_fully_missing(fundamentals)
+    markdown = "펀더멘털 데이터 미제공" if missing else to_markdown_table(fundamentals)
+    return AnalysisResult(
+        title="밸류에이션", markdown=markdown, json=fundamentals,
+        polarity=None if missing else _per_polarity(fundamentals),
     )
-    return AnalysisResult(title="밸류에이션", markdown=markdown, json=fundamentals)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -564,13 +599,18 @@ def pair_section(ctx: dict) -> AnalysisResult:
                    "STOP_LOSS": "171,71,188"}.get(signal, "100,100,100")
 
         pc1, pc2, pc3, pc4 = st.columns([1, 1, 1, 2])
-        pc1.metric("비교 종목", pair_info["peer_name"], pair_info["peer"])
-        pc2.metric(
-            "공적분 (Engle-Granger)",
-            "있음 ✅" if coint.is_cointegrated else "없음 ❌",
-            f"p={coint.pvalue:.4f}",
-        )
-        pc3.metric(f"종합 Z-score ({_PAIR_ZSCORE_WINDOW}일)", f"{agg.composite_zscore:+.2f} σ", signal)
+        with pc1:
+            render_signal_card("비교 종목", pair_info["peer_name"], pair_info["peer"], polarity=None)
+        with pc2:
+            render_signal_card(
+                "공적분 (Engle-Granger)",
+                "있음 ✅" if coint.is_cointegrated else "없음 ❌",
+                f"p={coint.pvalue:.4f}",
+                polarity="bullish" if coint.is_cointegrated else "bearish",
+            )
+        with pc3:
+            render_signal_card(f"종합 Z-score ({_PAIR_ZSCORE_WINDOW}일)", f"{agg.composite_zscore:+.2f} σ",
+                                signal, polarity=polarity_from_signal(signal))
         with pc4:
             st.markdown(
                 f'<div style="background:rgba({sig_rgb},0.12);'
@@ -596,6 +636,7 @@ def pair_section(ctx: dict) -> AnalysisResult:
             "페어_신호": agg.signal_a, "페어_공적분_pvalue": coint.pvalue,
         },
         render=_render,
+        polarity=polarity_from_signal(agg.signal_a),
     )
 
 
@@ -620,6 +661,7 @@ def fear_greed_section(ctx: dict) -> AnalysisResult:
         "탐욕 우세 — 상승 기대감 강함. 과열 여부 주의" if fg_score <= 80 else
         "극도의 탐욕 — 시장 과열 신호. 포트폴리오 리스크 점검 권장"
     )
+    fg_polarity = "bearish" if fg_score < 40 else "bullish" if fg_score > 60 else "neutral"
 
     markdown = (
         f"CNN 공포·탐욕 지수: {fg_score}/100 ({fg_label})\n"
@@ -678,4 +720,5 @@ def fear_greed_section(ctx: dict) -> AnalysisResult:
         markdown=markdown,
         json={"FG_점수": fg_score, "FG_라벨": fg_label, "VIX": fg_vix},
         render=_render,
+        polarity=fg_polarity,
     )

@@ -527,13 +527,14 @@ with tab_trades:
         win_n  = sum(1 for t in r.trades if t.return_pct > 0)
         loss_n = len(r.trades) - win_n
 
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("전체 거래",  f"{len(r.trades)}회")
-        m2.metric("승리",       f"{win_n}회 ({r.win_rate*100:.0f}%)")
-        m3.metric("패배",       f"{loss_n}회 ({(1-r.win_rate)*100:.0f}%)")
-        m4.metric("총 손익",
-                  f"₩{sum(t.profit for t in r.trades):+,.0f}" if is_kr
-                  else f"${sum(t.profit for t in r.trades):+,.2f}")
+        with st.container(border=True):
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("전체 거래",  f"{len(r.trades)}회")
+            m2.metric("승리",       f"{win_n}회 ({r.win_rate*100:.0f}%)")
+            m3.metric("패배",       f"{loss_n}회 ({(1-r.win_rate)*100:.0f}%)")
+            m4.metric("총 손익",
+                      f"₩{sum(t.profit for t in r.trades):+,.0f}" if is_kr
+                      else f"${sum(t.profit for t in r.trades):+,.2f}")
 
         st.divider()
 

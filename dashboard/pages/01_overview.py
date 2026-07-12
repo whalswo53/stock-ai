@@ -16,6 +16,7 @@ from analysis.technical.indicators import (
     TechnicalIndicators, VOL_SPIKE_MULT, VWAP_WINDOW,
 )
 from config.sources import TICKER_KR_NAME, TICKER_SECTOR
+from ui.components import render_signal_card
 from utils.ticker_utils import detect_market, is_kr, resolve_currency, fmt_price_currency
 from utils.search_widget import ticker_search_widget
 
@@ -389,32 +390,35 @@ s1, s2, s3 = st.columns(3)
 
 rsi_val = latest["RSI"]
 if pd.isna(rsi_val):
-    rsi_label, rsi_delta = "데이터 부족", None
+    rsi_label, rsi_delta, rsi_polarity = "데이터 부족", "", None
 elif rsi_val >= 70:
-    rsi_label, rsi_delta = f"{rsi_val:.1f}", "과매수 구간"
+    rsi_label, rsi_delta, rsi_polarity = f"{rsi_val:.1f}", "과매수 구간", "bearish"
 elif rsi_val <= 30:
-    rsi_label, rsi_delta = f"{rsi_val:.1f}", "과매도 구간"
+    rsi_label, rsi_delta, rsi_polarity = f"{rsi_val:.1f}", "과매도 구간", "bullish"
 else:
-    rsi_label, rsi_delta = f"{rsi_val:.1f}", "중립"
-s1.metric("RSI (14)", rsi_label, rsi_delta)
+    rsi_label, rsi_delta, rsi_polarity = f"{rsi_val:.1f}", "중립", "neutral"
+with s1:
+    render_signal_card("RSI (14)", rsi_label, rsi_delta, polarity=rsi_polarity)
 
 macd_val, macd_sig = latest["MACD"], latest["MACD_Signal"]
 if pd.isna(macd_val) or pd.isna(macd_sig):
-    macd_label, macd_delta = "데이터 부족", None
+    macd_label, macd_delta, macd_polarity = "데이터 부족", "", None
 elif macd_val > macd_sig:
-    macd_label, macd_delta = f"{macd_val:.4f}", "골든크로스 (상승)"
+    macd_label, macd_delta, macd_polarity = f"{macd_val:.4f}", "골든크로스 (상승)", "bullish"
 else:
-    macd_label, macd_delta = f"{macd_val:.4f}", "데드크로스 (하락)"
-s2.metric("MACD", macd_label, macd_delta)
+    macd_label, macd_delta, macd_polarity = f"{macd_val:.4f}", "데드크로스 (하락)", "bearish"
+with s2:
+    render_signal_card("MACD", macd_label, macd_delta, polarity=macd_polarity)
 
 ma5, ma20 = latest.get("MA5"), latest.get("MA20")
 if ma5 is None or ma20 is None or pd.isna(ma5) or pd.isna(ma20):
-    ma_label, ma_delta = "데이터 부족", None
+    ma_label, ma_delta, ma_polarity = "데이터 부족", "", None
 elif ma5 > ma20:
-    ma_label, ma_delta = f"{fmt_price(ma5)}", "단기 상승 추세"
+    ma_label, ma_delta, ma_polarity = f"{fmt_price(ma5)}", "단기 상승 추세", "bullish"
 else:
-    ma_label, ma_delta = f"{fmt_price(ma5)}", "단기 하락 추세"
-s3.metric("MA5 vs MA20", ma_label, ma_delta)
+    ma_label, ma_delta, ma_polarity = f"{fmt_price(ma5)}", "단기 하락 추세", "bearish"
+with s3:
+    render_signal_card("MA5 vs MA20", ma_label, ma_delta, polarity=ma_polarity)
 
 # ── Candle patterns ───────────────────────────────────────────────────────────
 st.divider()
