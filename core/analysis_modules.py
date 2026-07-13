@@ -231,11 +231,14 @@ def candle_section(ctx: dict) -> AnalysisResult:
     if hist5y.empty or len(hist5y) < 120:
         return AnalysisResult(title="캔들 패턴", markdown="패턴 통계를 낼 만큼의 히스토리가 없습니다.")
 
-    hits = candle_patterns.recent_hits(hist5y, lookback_days=5)
+    hits = candle_patterns.recent_hits(hist5y)
     if not hits:
         return AnalysisResult(
             title="캔들 패턴",
-            markdown="최근 5거래일 내 인식된 캔들 패턴이 없습니다.",
+            markdown=(
+                f"최근 {candle_patterns.RECENT_PATTERN_LOOKBACK_DAYS}거래일 내 "
+                "인식된 캔들 패턴이 없습니다."
+            ),
             json={"캔들_패턴": []},
         )
 

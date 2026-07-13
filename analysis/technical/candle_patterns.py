@@ -40,6 +40,10 @@ PATTERNS: dict[str, tuple[str, str]] = {
 }
 
 
+# "최근 발생" 스캔 창 (거래일). 5일은 TA-Lib 패턴이 뜨는 빈도에 비해 너무 짧아
+# 대부분 "패턴 없음"으로 표시되는 문제가 있어 약 1개월로 확대.
+RECENT_PATTERN_LOOKBACK_DAYS = 20
+
 # 통계 판정 기준: 이 표본 수 미만이면 "판단 불가"
 MIN_SAMPLES = 50
 # 거래량 동반 판정: Vol_Ratio(20일 평균 대비)가 이 배수 이상
@@ -101,7 +105,7 @@ def _direction(value: float) -> str:
 def recent_hits(
     df: pd.DataFrame,
     signals: pd.DataFrame | None = None,
-    lookback_days: int = 5,
+    lookback_days: int = RECENT_PATTERN_LOOKBACK_DAYS,
 ) -> list[PatternHit]:
     """최근 lookback_days 거래일 안에 발생한 패턴 목록 (통계는 full_stats로 별도 계산).
 

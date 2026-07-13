@@ -441,16 +441,28 @@ else:
             "**복합 신호**: 거래량 동반(평균 1.5배↑), RSI 결합(강세+RSI≤40 / 약세+RSI≥60), "
             "MACD 결합(히스토그램 부호 일치) 조건별로 승률을 분리 표시합니다.  \n"
             "**업종 풀 집계**: 개별 종목 표본이 부족할 때 같은 업종 종목 전체의 발생을 "
-            "합산해 통계를 냅니다 (종목별 특성은 희석되는 트레이드오프)."
+            "합산해 통계를 냅니다 (종목별 특성은 희석되는 트레이드오프).  \n"
+            "**'수익률 측정 기간'과 '최근 스캔 범위'는 서로 다른 축입니다** — "
+            "측정 기간은 신뢰도(승률·평균수익) 계산에 쓰는 과거 5년치 발생 사례의 "
+            "'N일 후' 기준이고, 스캔 범위는 그 신뢰도를 적용해 보여줄 '최근 며칠 내 "
+            "새로 발생한 패턴'을 고르는 창입니다."
         )
 
-    pc1, pc2 = st.columns([1, 2])
+    pc1, pc2, pc3 = st.columns([1, 1, 2])
     with pc1:
         horizon = st.radio(
             "수익률 측정 기간 (N일 후)", [3, 5, 10], index=1, horizontal=True,
             key="pattern_horizon",
+            help="신뢰도(승률·평균수익)는 과거 발생 사례들의 N일 후 평균 수익률로 계산합니다.",
         )
     with pc2:
+        lookback = st.radio(
+            "최근 스캔 범위 (거래일)", [10, 20, 40],
+            index=[10, 20, 40].index(candle_patterns.RECENT_PATTERN_LOOKBACK_DAYS),
+            horizontal=True, key="pattern_lookback",
+            help="이 기간 내 새로 발생한 패턴만 아래 표에 표시합니다 (신뢰도 계산 기간과는 별개).",
+        )
+    with pc3:
         pool_on = st.checkbox(
             "업종 전체 종목 풀에서 집계 (개별 표본 부족 보완)",
             value=False, key="pattern_pool",
@@ -470,9 +482,9 @@ else:
     if hist5y.empty or len(hist5y) < 120:
         st.caption("패턴 통계를 낼 만큼의 히스토리가 없습니다.")
     else:
-        hits = candle_patterns.recent_hits(hist5y, lookback_days=5)
+        hits = candle_patterns.recent_hits(hist5y, lookback_days=lookback)
         if not hits:
-            st.info("최근 5거래일 내 인식된 캔들 패턴이 없습니다.")
+            st.info(f"최근 {lookback}거래일 내 인식된 캔들 패턴이 없습니다.")
         else:
             # 통계 집계 풀 구성 (기본: 이 종목 / 옵션: 같은 업종 전체)
             stat_dfs = [hist5y]
@@ -531,7 +543,10 @@ else:
                     "+ MACD 결합":   _cell(stats["macd"]),
                 })
 
-            st.caption(f"📊 집계 기준: **{pool_label}** · 수익률 측정 {horizon}일 후")
+            st.caption(
+                f"📊 집계 기준: **{pool_label}** · 수익률 측정 {horizon}일 후 · "
+                f"최근 {lookback}거래일 내 발생분만 표시"
+            )
             render_clean_table(pd.DataFrame(main_rows), judgment_col="판정", label_col="패턴")
 
             st.markdown("**복합 신호 성과** — 조건 동시 충족 시 승률 (평균수익, 표본)")
