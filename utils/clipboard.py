@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import base64
 
-import streamlit.components.v1 as components
+import streamlit as st
 
 _DEFAULT_GRADIENT = "linear-gradient(135deg,#7C3AED 0%,#5B21B6 100%)"
 
@@ -61,4 +61,4 @@ def copy_button(
     nav.clipboard.writeText(text).then(done).catch(function(){{fallback(text)}})
   }}else{{fallback(text)}}
 }})(this)">{label}</button>"""
-    components.html(html, height=height)
+    st.iframe(html, height=height)
