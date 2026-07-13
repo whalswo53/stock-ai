@@ -192,7 +192,10 @@ def _render_scan_results(
     )
     if len(df_show) > 5:
         with st.expander(f"전체 {len(df_show)}쌍 보기"):
-            render_clean_table(df_show, judgment_col=["공적분", "A 신호", "B 신호"])
+            render_clean_table(
+                df_show, judgment_col=["공적분", "A 신호", "B 신호"],
+                label_col=["종목 A", "종목 B"], best_col="p-value", best_mode="min",
+            )
 
     # Copula 의존성 (enrich_with_copula가 상위 후보에만 채움)
     cop_rows = [

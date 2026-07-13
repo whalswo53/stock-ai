@@ -186,8 +186,10 @@ def render_clean_table(
     df,
     judgment_col: str | list[str] | None = None,
     label_col: str | list[str] | None = None,
+    best_col: str | None = None,
+    best_mode: str = "min",
 ) -> None:
-    """세로 격자선 없는 공용 표 (Claude Design 확정 스펙 — 1단계: pill 배지).
+    """세로 격자선 없는 공용 표 (Claude Design 확정 스펙 — 2단계a: best값강조만).
 
     - 세로 격자선 없음, border-collapse. thead 배경 #f7f8fa, 행 구분은
       border-bottom만.
@@ -196,9 +198,11 @@ def render_clean_table(
       패턴명 등 핵심 식별값).
     - judgment_col: pill 배지로 렌더(_badge_html, POLARITY_COLOR/BG 재사용
       + CLOSE는 SLATE로 구분).
+    - best_col + best_mode("min"|"max"): 후보 중 최적값 1개 셀을 굵은 초록으로 강조.
 
-    주의: best_col/highlight_row_when(최적값 강조·행 하이라이트)은 세그폴트
-    인시던트(2026-07-13) 원인 격리를 위해 단계적으로 재도입 중 — 아직 없음.
+    주의: highlight_row_when(행 전체 하이라이트)은 세그폴트 인시던트
+    (2026-07-13) 원인 격리를 위해 이번 단계에서는 제외 — best_col만 먼저
+    배포 확인 후 별도 단계에서 재도입 예정.
     """
     judgment_cols = {judgment_col} if isinstance(judgment_col, str) else set(judgment_col or [])
     label_cols = {label_col} if isinstance(label_col, str) else set(label_col or [])
@@ -208,6 +212,18 @@ def render_clean_table(
         c for c in cols
         if c not in judgment_cols and _is_numeric_col([str(v) for v in df[c]])
     }
+
+    best_idx = None
+    if best_col is not None and best_col in cols:
+        parsed = []
+        for i, v in enumerate(df[best_col]):
+            cleaned = _re.sub(r"[^0-9+\-.]", "", str(v))
+            try:
+                parsed.append((float(cleaned), i))
+            except ValueError:
+                continue
+        if parsed:
+            best_idx = (min if best_mode == "min" else max)(parsed, key=lambda t: t[0])[1]
 
     def _col_align(c: str) -> str:
         return "right" if (c in numeric_cols or c in judgment_cols) else "left"
@@ -221,7 +237,7 @@ def render_clean_table(
     )
 
     body_rows = []
-    for _, row in df.iterrows():
+    for row_i, (_, row) in enumerate(df.iterrows()):
         cells = []
         for c in cols:
             raw = row[c]
@@ -230,7 +246,9 @@ def render_clean_table(
                 text = _badge_html(raw)
             else:
                 text = _html.escape("" if raw is None else str(raw))
-                if c in label_cols:
+                if row_i == best_idx and c == best_col:
+                    text = f'<span style="color:{POLARITY_COLOR["bullish"]};font-weight:700">{text}</span>'
+                elif c in label_cols:
                     text = f'<span style="font-weight:600">{text}</span>'
             numeric_style = "font-variant-numeric:tabular-nums;" if c in numeric_cols else ""
             cells.append(
