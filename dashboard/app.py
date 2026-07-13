@@ -11,6 +11,17 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 # 잡기 위한 계측 — 평상시엔 오버헤드가 사실상 없다.
 _faulthandler_log = Path(__file__).resolve().parent.parent / "logs" / "faulthandler.log"
 _faulthandler_log.parent.mkdir(exist_ok=True)
+
+# 터미널 접근이 안 되는 배포 환경(Streamlit Cloud)에서도 이전 실행의 크래시
+# 로그를 볼 수 있도록, 재시작 시 파일 내용을 표준 로그 스트림에 그대로 찍는다.
+if os.path.exists(_faulthandler_log):
+    with open(_faulthandler_log) as f:
+        content = f.read()
+    if content.strip():
+        print("=== PREVIOUS CRASH LOG ===")
+        print(content)
+        print("=== END CRASH LOG ===")
+
 faulthandler.enable(file=open(_faulthandler_log, "a"), all_threads=True)
 
 import streamlit as st
